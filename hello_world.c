@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later OR BSD-3-Clause
 
 #include <asm/unistd.h>
+#include <stdlib.h>
 #include <unistd.h>
 
+/*
+  Local system call implementations
+*/
+
+// void exit(int status)
 static void sys_exit(int status) {
 	int r;
 	asm volatile("syscall"
@@ -11,6 +17,7 @@ static void sys_exit(int status) {
 		     : "rcx", "r11", "memory");
 }
 
+// ssize_t write(int fd, const void *buf, size_t count)
 static ssize_t sys_write(int fd, const void *buf, size_t count) {
 	ssize_t r;
 	asm volatile("syscall"
@@ -20,8 +27,9 @@ static ssize_t sys_write(int fd, const void *buf, size_t count) {
 	return r;
 }
 
+// First function started from kernel
 void _start(void) {
 	static const char msg[] = "Hello World from ld-so-daemon!\n";
-	sys_write(2, msg, sizeof(msg));
-	sys_exit(-1);
+	sys_write(STDERR_FILENO, msg, sizeof(msg));
+	sys_exit(EXIT_SUCCESS);
 }

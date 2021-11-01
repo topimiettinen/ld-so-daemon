@@ -7,6 +7,11 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/*
+  Local system call implementations
+*/
+
+// int close(int fd)
 static int sys_close(int fd) {
 	int r;
 	asm volatile("syscall"
@@ -16,6 +21,7 @@ static int sys_close(int fd) {
 	return r;
 }
 
+// int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 static int sys_connect(int sockfd, const struct sockaddr *addr,
 		       socklen_t addrlen) {
 	int r;
@@ -26,6 +32,7 @@ static int sys_connect(int sockfd, const struct sockaddr *addr,
 	return r;
 }
 
+// void exit(int status)
 static void sys_exit(int status) {
 	int r;
 	asm volatile("syscall"
@@ -34,6 +41,7 @@ static void sys_exit(int status) {
 		     : "rcx", "r11", "memory");
 }
 
+// void *sys_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 static void *sys_mmap(void *addr, size_t length, int prot, int flags, int fd,
 		      off_t offset) {
 	void *r;
@@ -51,6 +59,7 @@ static void *sys_mmap(void *addr, size_t length, int prot, int flags, int fd,
 	return r;
 }
 
+// int munmap(void *addr, size_t length) {
 static int sys_munmap(void *addr, size_t length) {
 	int r;
 	asm volatile("syscall"
@@ -60,6 +69,7 @@ static int sys_munmap(void *addr, size_t length) {
 	return r;
 }
 
+// ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
 static ssize_t sys_recvmsg(int sockfd, struct msghdr *msg, int flags) {
 	ssize_t r;
 	asm volatile("syscall"
@@ -69,6 +79,7 @@ static ssize_t sys_recvmsg(int sockfd, struct msghdr *msg, int flags) {
 	return r;
 }
 
+// int socket(int domain, int type, int protocol)
 static int sys_socket(int domain, int type, int protocol) {
 	int r;
 	asm volatile("syscall"
@@ -78,6 +89,7 @@ static int sys_socket(int domain, int type, int protocol) {
 	return r;
 }
 
+// ssize_t write(int fd, const void *buf, size_t count)
 static ssize_t sys_write(int fd, const void *buf, size_t count) {
 	ssize_t r;
 	asm volatile("syscall"
@@ -87,6 +99,11 @@ static ssize_t sys_write(int fd, const void *buf, size_t count) {
 	return r;
 }
 
+/*
+  Local library function implementations
+*/
+
+// void memcpy(void *dest, const void *src, size_t n)
 static void xmemcpy(void *dst, const void *src, size_t count) {
 	char *d = dst;
 	const char *s = src;
@@ -94,6 +111,7 @@ static void xmemcpy(void *dst, const void *src, size_t count) {
 		*d++ = *s++;
 }
 
+// For some reason, macro CMSG_NXTHDR() doesn't get inlined, so we provide it here
 static struct cmsghdr *xCMSG_NXTHDR(struct msghdr *mhdr, struct cmsghdr *cmsg) {
 	if ((size_t)cmsg->cmsg_len < sizeof(struct cmsghdr))
 		return NULL;
@@ -108,9 +126,11 @@ static struct cmsghdr *xCMSG_NXTHDR(struct msghdr *mhdr, struct cmsghdr *cmsg) {
 	return cmsg;
 }
 
+// First function started from kernel
 void _start(void) {
 	int r;
 
+	// Connect to server's UNIX socket
 	static const struct sockaddr_un sa = { .sun_family = AF_UNIX,
 					       .sun_path = LD_SO_DAEMON_SOCKET };
 	int fd = sys_socket(AF_UNIX, SOCK_STREAM, 0);
@@ -131,31 +151,35 @@ void _start(void) {
 	int fds[1024];
 
 	for (;;) {
+		// Get commands from server
 		char buf[4096];
 		struct packet p;
 		struct iovec iov = {
+			// TBD the pointers may be stale after stack switch
 			.iov_base = &p,
 			.iov_len = sizeof(p),
 		};
-		struct msghdr msg = { .msg_iov = &iov,
-				      .msg_iovlen = sizeof(iov) /
-					      sizeof(struct iovec),
-				      .msg_control = buf,
-				      .msg_controllen = sizeof(buf) };
+		struct msghdr msg = {
+			// TBD the pointers may be stale after stack switch
+			.msg_iov = &iov,
+			.msg_iovlen = sizeof(iov) / sizeof(struct iovec),
+			// TBD the pointers may be stale after stack switch
+			.msg_control = buf,
+			.msg_controllen = sizeof(buf)
+		};
 		r = sys_recvmsg(fd, &msg, 0);
 		if (r <= 0)
 			sys_exit(-1);
 
+		// Process commands from server
 		switch (p.code) {
-		case 'C': // call
+		case 'C': // Call
 			asm volatile("call *%0\n"
 				     :
 				     : "r"(p.longval)
 				     : "memory");
 			break;
-		case 'E': // exit
-			for (;;)
-				;
+		case 'E': // Exit
 			sys_exit(p.longval);
 			break;
 		case 'F': { // File descriptors
@@ -173,13 +197,14 @@ void _start(void) {
 		case 'L': // cLose
 			sys_close(fds[p.longval]);
 			break;
-		case 'M': // mmap
+		case 'M': // Mmap
 			sys_mmap(p.mmap.addr, p.mmap.length, p.mmap.prot,
 				 p.mmap.flags,
 				 p.mmap.fd == -1 ? -1 : fds[p.mmap.fd],
 				 p.mmap.offset);
 			break;
 		case 'S': // Switch stack
+			// TBD the switch may make the pointers stale
 			xmemcpy(p.stack.dst, p.stack.src, p.stack.length);
 			asm volatile(
 				"subq %%rsp, %%rbp\n"
@@ -189,10 +214,10 @@ void _start(void) {
 				: "r"(p.stack.delta)
 				: "memory");
 			break;
-		case 'U': // munmap
+		case 'U': // mUnmap
 			sys_munmap(p.munmap.addr, p.munmap.length);
 			break;
-		case 'W': // write
+		case 'W': // Write
 			sys_write(2, &p.write.buf, p.write.count);
 			break;
 		}

@@ -21,6 +21,13 @@
 
 #define MAX_EVENTS 10
 
+#if DEBUG
+#define DPRINTF(format, ...)						\
+	fprintf(stderr, "%s: " format, __FUNCTION__, ##__VA_ARGS__)
+#else
+#define DPRINTF(format, ...) do { } while (0)
+#endif
+
 struct client_info {
 	int fd;
 	struct ucred creds;
@@ -28,8 +35,7 @@ struct client_info {
 	char *pidcon, *peercon;
 };
 
-static int debug = 0;
-
+// Set socket nonblocking
 static void set_nonblock(int fd) {
 	int r;
 
@@ -40,6 +46,7 @@ static void set_nonblock(int fd) {
 	}
 }
 
+// Register new file descriptors for epoll()ing
 static void epoll_register(int epollfd, int fd, int events) {
 	int r;
 
@@ -53,6 +60,7 @@ static void epoll_register(int epollfd, int fd, int events) {
 	}
 }
 
+// Enable socket options SO_PASSCRED, SO_PASSSEC
 static void set_options(int fd) {
 	int r;
 	static const int one = 1;
@@ -67,6 +75,7 @@ static void set_options(int fd) {
 	}
 }
 
+// Get client's PID, UID, GID
 static void get_cred(int fd, size_t size, struct ucred *ret_ucred) {
 	int r;
 	socklen_t ret_size = size;
@@ -77,6 +86,7 @@ static void get_cred(int fd, size_t size, struct ucred *ret_ucred) {
 	}
 }
 
+// Send a packet, possibly also file descriptors (one ATM)
 static void send_packet(struct client_info *client, struct packet *p, int fd) {
 	union {
 		char buf[CMSG_SPACE(sizeof(fd))];
@@ -106,6 +116,7 @@ static void send_packet(struct client_info *client, struct packet *p, int fd) {
 	sendmsg(client->fd, &msg, 0);
 }
 
+// Send a file descriptor
 static void send_fd(struct client_info *client, int fd) {
 	struct packet p;
 	memset(&p, 0, sizeof(p));
@@ -113,6 +124,7 @@ static void send_fd(struct client_info *client, int fd) {
 	send_packet(client, &p, fd);
 }
 
+// Check file properties and send a file descriptor of it if OK
 static void process_file(struct client_info *client, const char *file) {
 	int r;
 
@@ -129,11 +141,16 @@ static void process_file(struct client_info *client, const char *file) {
 		goto finish;
 	}
 
+	// The file must be a regular file or a symlink
 	if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) {
 		fprintf(stderr, "Bad file type for %s, ignoring\n", file);
 		goto finish;
 	}
 
+	/*
+	  The file must be world readable (in case the server runs
+	  with different privileges than the client)
+	*/
 	if ((st.st_mode & S_IROTH) != S_IROTH) {
 		fprintf(stderr, "File %s isn't world readable, ignoring\n", file);
 		goto finish;
@@ -144,8 +161,15 @@ static void process_file(struct client_info *client, const char *file) {
 	r = fgetfilecon_raw(fd, &filecon);
 	if (r < 0)
 		goto finish;
+
 	r = selinux_check_access(client->pidcon, filecon, "file", "execute",
 				 NULL);
+	// TODO maybe more checks like:
+	// file { open read map }
+	// process { execheap execmem execmod execstack }
+
+	// TODO remove #if 0: fix check above to consider also
+	// whether the domain is permissive
 #if 0
 	if (r < 0)
 		goto finish;
@@ -156,6 +180,7 @@ finish:
 	close(fd);
 }
 
+// Send Mmap command
 static unsigned long process_mmap(struct client_info *client, const char *line) {
 	int r;
 	struct packet p;
@@ -167,11 +192,13 @@ static unsigned long process_mmap(struct client_info *client, const char *line) 
 	if (r == EOF)
 		return -1;
 	p.mmap.fd = 0;
+	// TODO pick a free random address
 	p.mmap.addr = (void *)(0x123456000UL + map_addr);
 	send_packet(client, &p, -1);
 	return (unsigned long)p.mmap.addr;
 }
 
+// Send a command with long value
 static void process_number(struct client_info *client, char code,
 			   unsigned long value) {
 	struct packet p;
@@ -181,6 +208,7 @@ static void process_number(struct client_info *client, char code,
 	send_packet(client, &p, -1);
 }
 
+// Send a command with string value
 static void process_string(struct client_info *client, char code,
 			   const char *string) {
 	size_t len = strlen(string);
@@ -196,8 +224,10 @@ static void process_string(struct client_info *client, char code,
 	send_packet(client, &p, -1);
 }
 
+// Load a profile file
 static bool process_profile(struct client_info *client, const char *prefix) {
 #ifdef FORCE_UNIT
+	// Test use
 	FILE *f = fopen(FORCE_UNIT, "r");
 #else
 	char path[4096];
@@ -222,7 +252,7 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 
 		if (!s)
 			goto finish;
-		fprintf(stderr, "Got line %s\n", line);
+		DPRINTF("Got line %s\n", line);
 		switch (*line) {
 		case '#':
 		case '\0':
@@ -261,8 +291,20 @@ finish:
 	return true;
 }
 
+/*
+  Load a profile named `service.profile` using the name of the
+  service. The profiles are loaded from directories
+
+  `/etc/ld.so.daemon` (local admin)
+  `/usr/lib/ld.so.daemon/` (distro),
+  `/run/ld.so.daemon` (generators)
+
+  The first found wins and further directories are not read: it
+  wouldn't make sense to merge the files.
+*/
 static void process_profiles(struct client_info *client) {
 #ifdef PROFILE_DIR
+	// Test use
 	if (process_profile(client, PROFILE_DIR))
 		return;
 #endif
@@ -274,6 +316,7 @@ static void process_profiles(struct client_info *client) {
 		return;
 }
 
+// Send mUnmap command
 static unsigned long process_munmap(struct client_info *client,
 				    unsigned long start, size_t length) {
 	struct packet p;
@@ -285,10 +328,20 @@ static unsigned long process_munmap(struct client_info *client,
 	return 0;
 }
 
+/*
+  Switch stacks:
+  - map a new area for new stack
+  - order client to copy the old stack and switch to new stack
+  - unmap old stack
+*/
 static unsigned long process_stack(struct client_info *client,
 				   unsigned long start, size_t length) {
 	struct packet p;
+	// TODO pick a free random address
 	unsigned long addr = 0x10000000;
+	// TODO check RLIMIT_STACK but 2MB should be good enough for
+	// all apps and a fully allocated stack is better for
+	// randomization, or make this configurable per client
 	size_t new_length = 2 * 1024 * 1024;
 
 	// Map a new stack
@@ -320,6 +373,18 @@ static unsigned long process_stack(struct client_info *client,
 	return 0;
 }
 
+/*
+  Read /proc/$CLIENT/maps and check for unexpected segments.
+
+  [heap] segments are unmapped (TBD, assumes libaslrmalloc)
+
+  [stack] segments are relocated (TBD, could be too fragile)
+
+  [vvar] and [vdso] segments are not touched (TBD, check if they are
+  relocatable)
+
+  Other segments must point to our client executable.
+*/
 static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 	int r;
 	char path[4096];
@@ -341,7 +406,7 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		if (!s)
 			goto finish;
 
-		fprintf(stderr, "Got line %s\n", line);
+		DPRINTF("Got line %s\n", line);
 
 		unsigned long start, stop, offset;
 		int pos;
@@ -350,28 +415,37 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		if (r == EOF)
 			return -1;
 		char *name = &line[pos];
-		fprintf(stderr, "start %lx stop %lx offset %lx %s\n", start,
+		DPRINTF("start %lx stop %lx offset %lx %s\n", start,
 			stop, offset, name);
+
+		// On the second pass, don't process but just output
+		// TODO could verify that changes are applied correctly
 		if (!process)
 			continue;
 
+		// TODO assumes libaslrmalloc
 		if (strcmp(name, "[heap]") == 0) {
 			process_munmap(client, start, stop - start);
 			continue;
 		}
 
+		// TODO check if these can be relocated
 		if (strcmp(name, "[vvar]") == 0 || strcmp(name, "[vdso]") == 0)
 			continue;
 
+		// TODO maybe switching stacks is too fragile
 		if (strcmp(name, "[stack]") == 0) {
 			process_stack(client, start, stop - start);
 			continue;
 		}
 
+		// Does this point to our client executable?
 		size_t len = strlen(name);
+		// TODO check full path
 		if (len > sizeof(CLIENT) &&
 		    strcmp(&name[len - sizeof(CLIENT) + 1], CLIENT) == 0)
 			continue;
+
 		// Bad segments
 		fprintf(stderr, "Bad segment %s, want %s\n", name, CLIENT);
 		fclose(f);
@@ -383,6 +457,7 @@ finish:
 	return true;
 }
 
+// Identify client
 static void process_client(int client_fd) {
 	int r;
 
@@ -399,18 +474,21 @@ static void process_client(int client_fd) {
 
 	r = getpeercon_raw(client_fd, &client.peercon);
 
-	fprintf(stderr, "PID %u UID %u GID %u unit %s pidcon %s peercon %s\n",
+	DPRINTF("PID %u UID %u GID %u unit %s pidcon %s peercon %s\n",
 		client.creds.pid, client.creds.uid, client.creds.gid,
 		client.unit, client.pidcon, client.peercon);
 
+	// First pass: process segments
 	r = check_pid_maps(&client, client.creds.pid, true);
 	if (!r)
 		goto finish;
 
+	// Second pass: only output (should verify)
 	r = check_pid_maps(&client, client.creds.pid, false);
 	if (!r)
 		goto finish;
 
+	// Load profile
 	process_profiles(&client);
 
 finish:
@@ -424,6 +502,7 @@ finish:
 int main(void) {
 	int r;
 
+	// Set up listening socket
 	int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
 		sd_notifyf(0,
@@ -472,6 +551,7 @@ int main(void) {
 
 	sd_notify(0, "READY=1");
 
+	// Main event loop
 	for (;;) {
 		struct epoll_event events[MAX_EVENTS];
 		int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
@@ -486,11 +566,8 @@ int main(void) {
 
 		for (int n = 0; n < nfds; ++n) {
 			int fd = events[n].data.fd;
-			// int event = events[n].events;
 			if (fd == listen_fd) {
-				if (debug)
-					fprintf(stderr,
-						"event on listen fd %d\n", fd);
+				DPRINTF("event on listen fd %d\n", fd);
 
 				int client_fd = accept4(listen_fd, NULL, NULL,
 							SOCK_CLOEXEC);
