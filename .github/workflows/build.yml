@@ -1,0 +1,37 @@
+name: GitHub CI
+
+on:
+  pull_request:
+    branches: [ master ]
+    paths:
+      - 'meson.build'
+      - '.github/workflows/**'
+      - '**.c'
+  push:
+    branches: [ master ]
+    paths:
+      - 'meson.build'
+      - '.github/workflows/**'
+      - '**.c'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env:
+          - { CC: "gcc" }
+          - { CC: "clang" }
+    env: ${{ matrix.env }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+      - name: Install packages
+        run: sudo apt-get install build-essential gcc clang meson
+      - name: Setup
+        run: meson setup builddir/
+      - name: Compile with (${{ env.CC }})
+        run: meson compile -C builddir/ -v
+      - name: Test
+        run: meson test -C builddir/ -v
