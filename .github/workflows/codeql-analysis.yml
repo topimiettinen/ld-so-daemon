@@ -78,7 +78,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v1
     - name: Install packages
-      run: sudo apt-get install build-essential gcc clang meson
+      run: sudo apt-get install build-essential gcc clang meson libsystemd-dev libselinux1-dev
     - name: Setup
       run: meson setup builddir/
     - name: Compile with (${{ env.CC }})
