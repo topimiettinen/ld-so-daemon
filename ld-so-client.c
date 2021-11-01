@@ -87,8 +87,9 @@ static ssize_t sys_write(int fd, const void *buf, size_t count) {
 	return r;
 }
 
-static void xmemcpy(void *dst, void *src, size_t count) {
-	char *d = dst, *s = src;
+static void xmemcpy(void *dst, const void *src, size_t count) {
+	char *d = dst;
+	const char *s = src;
 	while (count-- > 0)
 		*d++ = *s++;
 }
