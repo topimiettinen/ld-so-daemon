@@ -27,30 +27,32 @@ server = executable('ld-so-server',
   install: true,
 )
 
-client = executable(client_exe,
-  'ld-so-client.c',
-  c_args: ['-nostdlib', '-nostartfiles', '-shared'],
-  link_args: ['-nostdlib', '-nostartfiles', '-shared'],
-  install: true,
-  pie: true,
-)
-
-test_1 = executable('test_1',
-  'hello_world.c',
-  c_args: ['-nostdlib', '-nostartfiles', '-shared'],
-  link_args: ['-nostdlib', '-nostartfiles', '-shared'],
-  pie: true,
-)
-
-gen = meson.source_root() / 'generator.sh'
-test_profile = 'TEST'
-test_profile_dir = meson.build_root() / 'tests'
-mytarget = custom_target('targetname',
-  output: test_profile,
-  input: test_1,
-  build_by_default: true,
-  command: [gen, '@BUILD_ROOT@/@INPUT@', '@BUILD_ROOT@/@OUTPUT@']
+if get_option('b_coverage') != true
+  client = executable(client_exe,
+    'ld-so-client.c',
+    c_args: ['-nostdlib', '-nostartfiles', '-shared'],
+    link_args: ['-nostdlib', '-nostartfiles', '-shared'],
+    install: true,
+    pie: true,
   )
+
+  test_1 = executable('test_1',
+    'hello_world.c',
+    c_args: ['-nostdlib', '-nostartfiles', '-shared'],
+    link_args: ['-nostdlib', '-nostartfiles', '-shared'],
+    pie: true,
+  )
+
+  gen = meson.source_root() / 'generator.sh'
+  test_profile = 'TEST'
+  test_profile_dir = meson.build_root() / 'tests'
+  mytarget = custom_target('targetname',
+    output: test_profile,
+    input: test_1,
+    build_by_default: true,
+    command: [gen, '@BUILD_ROOT@/@INPUT@', '@BUILD_ROOT@/@OUTPUT@']
+    )
+endif
 
 test_2 = executable('test_2',
   'ld-so-server.c',
