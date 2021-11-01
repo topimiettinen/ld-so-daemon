@@ -6,19 +6,17 @@
 static void sys_exit(int status) {
 	int r;
 	asm volatile("syscall"
-		     : "=a" (r)
+		     : "=a"(r)
 		     : "0"(__NR_exit), "D"(status)
-		     : "rcx", "r11", "memory"
-		     );
+		     : "rcx", "r11", "memory");
 }
 
 static ssize_t sys_write(int fd, const void *buf, size_t count) {
 	ssize_t r;
 	asm volatile("syscall"
-		     : "=a" (r)
+		     : "=a"(r)
 		     : "0"(__NR_write), "D"(fd), "S"(buf), "d"(count)
-		     : "rcx", "r11", "memory"
-		     );
+		     : "rcx", "r11", "memory");
 	return r;
 }
 

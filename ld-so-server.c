@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later OR BSD-3-Clause
 
 #define _GNU_SOURCE
+#include "config.h"
+#include "ld-so-protocol.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <selinux/selinux.h>
@@ -11,14 +14,10 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/un.h>
 #include <systemd/sd-daemon.h>
 #include <systemd/sd-login.h>
 #include <unistd.h>
-
-#include "config.h"
-#include "ld-so-protocol.h"
 
 #define MAX_EVENTS 10
 
@@ -27,7 +26,6 @@ struct client_info {
 	struct ucred creds;
 	char *unit;
 	char *pidcon, *peercon;
-
 };
 
 static int debug = 0;
@@ -58,10 +56,7 @@ static void epoll_register(int epollfd, int fd, int events) {
 static void set_options(int fd) {
 	int r;
 	static const int one = 1;
-	static const int options[] = {
-		SO_PASSCRED,
-		SO_PASSSEC
-	};
+	static const int options[] = { SO_PASSCRED, SO_PASSSEC };
 
 	for (unsigned int i = 0; i < sizeof(options) / sizeof(int); i++) {
 		r = setsockopt(fd, SOL_SOCKET, options[i], &one, sizeof(one));
@@ -123,28 +118,24 @@ static void process_file(struct client_info *client, const char *file) {
 
 	int fd = open(file, O_RDONLY);
 	if (fd < 0) {
-		fprintf(stderr, "Bad file %s, ignoring\n",
-			file);
+		fprintf(stderr, "Bad file %s, ignoring\n", file);
 		return;
 	}
 
 	struct stat st;
 	r = fstat(fd, &st);
 	if (r < 0) {
-		fprintf(stderr, "Can't stat %s, ignoring\n",
-			file);
+		fprintf(stderr, "Can't stat %s, ignoring\n", file);
 		goto finish;
 	}
 
 	if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) {
-		fprintf(stderr, "Bad file type for %s, ignoring\n",
-			file);
+		fprintf(stderr, "Bad file type for %s, ignoring\n", file);
 		goto finish;
 	}
 
 	if ((st.st_mode & S_IROTH) != S_IROTH) {
-		fprintf(stderr, "File %s isn't world readable, ignoring\n",
-			file);
+		fprintf(stderr, "File %s isn't world readable, ignoring\n", file);
 		goto finish;
 	}
 
@@ -153,14 +144,15 @@ static void process_file(struct client_info *client, const char *file) {
 	r = fgetfilecon_raw(fd, &filecon);
 	if (r < 0)
 		goto finish;
-	r = selinux_check_access(client->pidcon, filecon, "file", "execute", NULL);
+	r = selinux_check_access(client->pidcon, filecon, "file", "execute",
+				 NULL);
 #if 0
 	if (r < 0)
 		goto finish;
 #endif
 
 	send_fd(client, fd);
- finish:
+finish:
 	close(fd);
 }
 
@@ -170,8 +162,8 @@ static unsigned long process_mmap(struct client_info *client, const char *line) 
 	memset(&p, 0, sizeof(p));
 	p.code = 'M';
 	unsigned long map_addr;
-	r = sscanf(line, " %li %zi %i %i %zi", &map_addr, &p.mmap.length, &p.mmap.prot,
-		   &p.mmap.flags, &p.mmap.offset);
+	r = sscanf(line, " %li %zi %i %i %zi", &map_addr, &p.mmap.length,
+		   &p.mmap.prot, &p.mmap.flags, &p.mmap.offset);
 	if (r == EOF)
 		return -1;
 	p.mmap.fd = 0;
@@ -180,7 +172,8 @@ static unsigned long process_mmap(struct client_info *client, const char *line) 
 	return (unsigned long)p.mmap.addr;
 }
 
-static void process_number(struct client_info *client, char code, unsigned long value) {
+static void process_number(struct client_info *client, char code,
+			   unsigned long value) {
 	struct packet p;
 	memset(&p, 0, sizeof(p));
 	p.code = code;
@@ -188,7 +181,8 @@ static void process_number(struct client_info *client, char code, unsigned long 
 	send_packet(client, &p, -1);
 }
 
-static void process_string(struct client_info *client, char code, const char *string) {
+static void process_string(struct client_info *client, char code,
+			   const char *string) {
 	size_t len = strlen(string);
 	struct packet p;
 	if (len >= sizeof(p.write.buf))
@@ -201,6 +195,7 @@ static void process_string(struct client_info *client, char code, const char *st
 	p.write.count = strlen(p.write.buf);
 	send_packet(client, &p, -1);
 }
+
 static bool process_profile(struct client_info *client, const char *prefix) {
 #ifdef FORCE_UNIT
 	FILE *f = fopen(FORCE_UNIT, "r");
@@ -208,7 +203,7 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 	char path[4096];
 
 	int r = snprintf(path, sizeof(path), "%s/ld.so.daemon/%s.profile",
-		     prefix, client->unit);
+			 prefix, client->unit);
 	if (r < 0 || r > sizeof(path))
 		return false;
 
@@ -261,7 +256,7 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 		}
 	}
 
- finish:
+finish:
 	fclose(f);
 	return true;
 }
@@ -279,7 +274,8 @@ static void process_profiles(struct client_info *client) {
 		return;
 }
 
-static unsigned long process_munmap(struct client_info *client, unsigned long start, size_t length) {
+static unsigned long process_munmap(struct client_info *client,
+				    unsigned long start, size_t length) {
 	struct packet p;
 	memset(&p, 0, sizeof(p));
 	p.code = 'U';
@@ -289,7 +285,8 @@ static unsigned long process_munmap(struct client_info *client, unsigned long st
 	return 0;
 }
 
-static unsigned long process_stack(struct client_info *client, unsigned long start, size_t length) {
+static unsigned long process_stack(struct client_info *client,
+				   unsigned long start, size_t length) {
 	struct packet p;
 	unsigned long addr = 0x10000000;
 	size_t new_length = 2 * 1024 * 1024;
@@ -348,11 +345,13 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 
 		unsigned long start, stop, offset;
 		int pos;
-		r = sscanf(line, "%lx-%lx %*c%*c%*c%*c %lx %*x:%*x %*d %n", &start, &stop, &offset, &pos);
+		r = sscanf(line, "%lx-%lx %*c%*c%*c%*c %lx %*x:%*x %*d %n",
+			   &start, &stop, &offset, &pos);
 		if (r == EOF)
 			return -1;
 		char *name = &line[pos];
-		fprintf(stderr, "start %lx stop %lx offset %lx %s\n", start, stop, offset, name);
+		fprintf(stderr, "start %lx stop %lx offset %lx %s\n", start,
+			stop, offset, name);
 		if (!process)
 			continue;
 
@@ -368,9 +367,10 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 			process_stack(client, start, stop - start);
 			continue;
 		}
-			
+
 		size_t len = strlen(name);
-		if (len > sizeof(CLIENT) && strcmp(&name[len - sizeof(CLIENT) + 1], CLIENT) == 0)
+		if (len > sizeof(CLIENT) &&
+		    strcmp(&name[len - sizeof(CLIENT) + 1], CLIENT) == 0)
 			continue;
 		// Bad segments
 		fprintf(stderr, "Bad segment %s, want %s\n", name, CLIENT);
@@ -378,7 +378,7 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		return false;
 	}
 
- finish:
+finish:
 	fclose(f);
 	return true;
 }
@@ -413,7 +413,7 @@ static void process_client(int client_fd) {
 
 	process_profiles(&client);
 
- finish:
+finish:
 	free(client.unit);
 	freecon(client.pidcon);
 	freecon(client.peercon);
@@ -426,44 +426,42 @@ int main(void) {
 
 	int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
-		sd_notifyf(0, "STATUS=Failed to start up: %s\n"
+		sd_notifyf(0,
+			   "STATUS=Failed to start up: %s\n"
 			   "ERRNO=%i",
-			   strerror(errno),
-			   errno);
+			   strerror(errno), errno);
 		perror("Can't create sockets, exiting\n");
 		exit(EXIT_FAILURE);
 	}
 
-	struct sockaddr_un sa = {
-		.sun_family = AF_UNIX,
-		.sun_path = LD_SO_DAEMON_SOCKET
-	};
+	struct sockaddr_un sa = { .sun_family = AF_UNIX,
+				  .sun_path = LD_SO_DAEMON_SOCKET };
 	r = bind(listen_fd, (const struct sockaddr *)&sa, sizeof(sa));
 	if (r < 0) {
-		sd_notifyf(0, "STATUS=Failed to start up: %s\n"
+		sd_notifyf(0,
+			   "STATUS=Failed to start up: %s\n"
 			   "ERRNO=%i",
-			   strerror(errno),
-			   errno);
+			   strerror(errno), errno);
 		perror("Can't bind sockets, exiting\n");
 		exit(EXIT_FAILURE);
 	}
 
 	r = listen(listen_fd, SOMAXCONN);
 	if (r < 0) {
-		sd_notifyf(0, "STATUS=Failed to start up: %s\n"
+		sd_notifyf(0,
+			   "STATUS=Failed to start up: %s\n"
 			   "ERRNO=%i",
-			   strerror(errno),
-			   errno);
+			   strerror(errno), errno);
 		perror("Can't listen to sockets, exiting\n");
 		exit(EXIT_FAILURE);
 	}
 
 	int epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
-		sd_notifyf(0, "STATUS=Failed to start up: %s\n"
+		sd_notifyf(0,
+			   "STATUS=Failed to start up: %s\n"
 			   "ERRNO=%i",
-			   strerror(errno),
-			   errno);
+			   strerror(errno), errno);
 		perror("epoll_create1");
 		exit(EXIT_FAILURE);
 	}
@@ -488,12 +486,14 @@ int main(void) {
 
 		for (int n = 0; n < nfds; ++n) {
 			int fd = events[n].data.fd;
-			//int event = events[n].events;
+			// int event = events[n].events;
 			if (fd == listen_fd) {
 				if (debug)
-					fprintf(stderr, "event on listen fd %d\n", fd);
+					fprintf(stderr,
+						"event on listen fd %d\n", fd);
 
-				int client_fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+				int client_fd = accept4(listen_fd, NULL, NULL,
+							SOCK_CLOEXEC);
 				if (client_fd < 0) {
 					perror("Can't accept sockets, exiting\n");
 					exit(EXIT_FAILURE);
