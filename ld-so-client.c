@@ -7,6 +7,16 @@
 
 #include "ld-so-protocol.h"
 
+static int sys_close(int fd) {
+	int r;
+	asm volatile("syscall"
+		     : "=a" (r)
+		     : "0"(__NR_close), "D"(fd)
+		     : "rcx", "r11", "memory"
+		     );
+	return r;
+}
+
 static int sys_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 	int r;
 	asm volatile("syscall"
@@ -164,6 +174,9 @@ void _start(void) {
 			}
 			break;
 		}
+		case 'L': // cLose
+			sys_close(fds[p.longval]);
+			break;
 		case 'M': // mmap
 			sys_mmap(p.mmap.addr, p.mmap.length, p.mmap.prot, p.mmap.flags,
 				 p.mmap.fd == -1? -1: fds[p.mmap.fd], p.mmap.offset);

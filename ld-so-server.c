@@ -245,6 +245,11 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 		case 'F': // File
 			process_file(client, line + 2);
 			break;
+		case 'L': { // cLose
+			int fd = strtol(line + 2, NULL, 0);
+			process_number(client, *line, fd);
+			break;
+		}
 		case 'M': // Mmap
 			base = process_mmap(client, line + 2);
 			break;

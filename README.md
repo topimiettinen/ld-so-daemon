@@ -14,6 +14,7 @@ It is used to pass file descriptors to the client and send the client commands t
 - call a function at an address
 - `write()` for debugging
 - `exit()`
+- `close()` received file descriptors
 
 Using these primitives, dynamic loading can be achieved.
 
