@@ -202,17 +202,19 @@ static void process_string(struct client_info *client, char code, const char *st
 	send_packet(client, &p, -1);
 }
 static bool process_profile(struct client_info *client, const char *prefix) {
-	char path[4096];
 #ifdef FORCE_UNIT
-	strcpy(path, FORCE_UNIT);
+	FILE *f = fopen(FORCE_UNIT, "r");
 #else
+	char path[4096];
+
 	int r = snprintf(path, sizeof(path), "%s/ld.so.daemon/%s.profile",
 		     prefix, client->unit);
 	if (r < 0 || r > sizeof(path))
 		return false;
-#endif
 
 	FILE *f = fopen(path, "r");
+#endif
+
 	if (!f)
 		return false;
 
