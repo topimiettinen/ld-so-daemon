@@ -8,6 +8,9 @@
   Local system call implementations
 */
 
+// bss
+int foo;
+
 // void exit(int status)
 static void sys_exit(int status) {
 	int r;

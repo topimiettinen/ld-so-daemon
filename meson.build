@@ -43,14 +43,15 @@ if get_option('b_coverage') != true
     pie: true,
   )
 
-  gen = meson.source_root() / 'generator.sh'
+  gen = meson.source_root() / 'generator.py'
   test_profile = 'TEST'
   test_profile_dir = meson.build_root() / 'tests'
   mytarget = custom_target('targetname',
     output: test_profile,
     input: test_1,
     build_by_default: true,
-    command: [gen, '@BUILD_ROOT@/@INPUT@', '@BUILD_ROOT@/@OUTPUT@']
+    capture: true,
+    command: [gen, '@BUILD_ROOT@/@INPUT@']
     )
 endif
 

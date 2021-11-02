@@ -4,8 +4,11 @@
 #include "config.h"
 #include "ld-so-protocol.h"
 
+#include <assert.h>
 #include <errno.h>
+#include <cpuid.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <selinux/selinux.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -17,10 +20,15 @@
 #include <sys/un.h>
 #include <systemd/sd-daemon.h>
 #include <systemd/sd-login.h>
+#include <sys/random.h>
 #include <unistd.h>
 
 #define MAX_EVENTS 10
+#define MAX_FILES 256
+#define STD_MAPS 4 // vvar + vdso + stack + heap
+#define MAX_MAPS (MAX_FILES + STD_MAPS)
 
+//#define DEBUG 1
 #if DEBUG
 #define DPRINTF(format, ...)						\
 	fprintf(stderr, "%s: " format, __FUNCTION__, ##__VA_ARGS__)
@@ -28,12 +36,26 @@
 #define DPRINTF(format, ...) do { } while (0)
 #endif
 
+// TODO assumes page size of 4096
+#define PAGE_BITS 12
+#define PAGE_SIZE (1 << PAGE_BITS)
+#define PAGE_MASK (~(PAGE_SIZE - 1))
+
+struct mapping {
+	unsigned long start, stop;
+};
 struct client_info {
 	int fd;
 	struct ucred creds;
 	char *unit;
 	char *pidcon, *peercon;
+	struct mapping maps[MAX_MAPS];
+	int n_maps;
 };
+
+static unsigned long random_address_mask;
+static int getrandom_bytes;
+static int user_va_space_bits;
 
 // Set socket nonblocking
 static void set_nonblock(int fd) {
@@ -86,6 +108,41 @@ static void get_cred(int fd, size_t size, struct ucred *ret_ucred) {
 	}
 }
 
+/*
+  Get needed random bytes, never giving up.
+*/
+static void get_random(void *data, size_t bytes) {
+	for (;;) {
+		ssize_t r = getrandom(data, bytes, GRND_RANDOM);
+		if (r == bytes)
+			return;
+	}
+}
+
+// Find a random free address range
+static unsigned long get_free_address(const struct client_info *client, size_t size) {
+	for (;;) {
+		unsigned long addr;
+retry:
+		get_random(&addr, getrandom_bytes);
+
+		addr <<= PAGE_BITS;
+		addr &= random_address_mask;
+		for (unsigned int i = 0; i < client->n_maps; i++) {
+			DPRINTF("checking %lx < %lx + %zx < %lx\n",
+				client->maps[i].start, addr, size,
+				client->maps[i].stop);
+			if ((addr >= client->maps[i].start &&
+			     addr <= client->maps[i].stop) ||
+			    (addr + size >= client->maps[i].start &&
+			     addr + size <= client->maps[i].stop))
+				goto retry;
+		}
+		DPRINTF("found %lx\n", addr);
+		return addr;
+	}
+}
+
 // Send a packet, possibly also file descriptors (one ATM)
 static void send_packet(struct client_info *client, struct packet *p, int fd) {
 	union {
@@ -125,13 +182,22 @@ static void send_fd(struct client_info *client, int fd) {
 }
 
 // Check file properties and send a file descriptor of it if OK
-static void process_file(struct client_info *client, const char *file) {
+static unsigned long process_file(struct client_info *client, const char *line) {
 	int r;
 
+	char *endptr;
+	unsigned long size = strtoul(line, &endptr, 0);
+	assert(endptr > line + 1);
+	assert(size < (1 << user_va_space_bits));
+	assert(*endptr == ' ');
+	endptr++;
+	assert(*endptr != '\0');
+
+	char *file = endptr;
 	int fd = open(file, O_RDONLY);
 	if (fd < 0) {
 		fprintf(stderr, "Bad file %s, ignoring\n", file);
-		return;
+		return -1;
 	}
 
 	struct stat st;
@@ -178,10 +244,12 @@ static void process_file(struct client_info *client, const char *file) {
 	send_fd(client, fd);
 finish:
 	close(fd);
+
+	return get_free_address(client, size);
 }
 
 // Send Mmap command
-static unsigned long process_mmap(struct client_info *client, const char *line) {
+static void process_mmap(struct client_info *client, unsigned long base, const char *line, int fd) {
 	int r;
 	struct packet p;
 	memset(&p, 0, sizeof(p));
@@ -190,12 +258,14 @@ static unsigned long process_mmap(struct client_info *client, const char *line) 
 	r = sscanf(line, " %li %zi %i %i %zi", &map_addr, &p.mmap.length,
 		   &p.mmap.prot, &p.mmap.flags, &p.mmap.offset);
 	if (r == EOF)
-		return -1;
-	p.mmap.fd = 0;
-	// TODO pick a free random address
-	p.mmap.addr = (void *)(0x123456000UL + map_addr);
+		return;
+	if (p.mmap.flags & MAP_ANONYMOUS)
+		p.mmap.fd = -1;
+	else
+		p.mmap.fd = fd;
+
+	p.mmap.addr = (void *)(base + map_addr);
 	send_packet(client, &p, -1);
-	return (unsigned long)p.mmap.addr;
 }
 
 // Send a command with long value
@@ -243,43 +313,68 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 	if (!f)
 		return false;
 
-	unsigned long base = 0;
+	unsigned long base[MAX_FILES];
 	for (;;) {
 		char line[BUFSIZ];
 		char *s = fgets(line, sizeof(line), f);
+		if (!s)
+			goto finish;
+
 		if (line[strlen(line) - 1] == '\n')
 			line[strlen(line) - 1] = '\0';
 
-		if (!s)
-			goto finish;
+		size_t len = strlen(line);
 		DPRINTF("Got line %s\n", line);
 		switch (*line) {
 		case '#':
 		case '\0':
 			continue;
-		case 'C': { // Call to mmap base + offset
-			unsigned long offset = strtoul(line + 2, NULL, 0);
-			process_number(client, *line, base + offset);
+		case 'C': { // Call to mmap base[file_id] + offset
+			assert(len > 2);
+			char *endptr;
+			int file_id = strtoul(line + 2, &endptr, 0);
+			assert(endptr > line + 2);
+			assert(file_id >= 0 && file_id < MAX_FILES);
+			assert(*endptr != '\0');
+			unsigned long offset = strtoul(endptr, NULL, 0);
+			assert(offset < ULONG_MAX);
+			DPRINTF("mmap base %lx offset %lx\n", base[file_id], offset);
+			process_number(client, *line, base[file_id] + offset);
 			break;
 		}
-		case 'E': { // Exit
-			int exit_status = strtol(line + 2, NULL, 0);
-			process_number(client, *line, exit_status);
+		case 'E': // Exit
+		case 'L': // cLose
+			{
+			assert(len > 2);
+			char *endptr;
+			int value = strtol(line + 2, &endptr, 0);
+			assert(endptr > line + 2);
+			process_number(client, *line, value);
 			break;
 		}
-		case 'F': // File
-			process_file(client, line + 2);
-			break;
-		case 'L': { // cLose
-			int fd = strtol(line + 2, NULL, 0);
-			process_number(client, *line, fd);
+		case 'F': { // File
+			assert(len > 2);
+			char *endptr;
+			int file_id = strtoul(line + 2, &endptr, 0);
+			assert(endptr > line + 2);
+			assert(file_id >= 0 && file_id < MAX_FILES);
+			assert(*endptr != '\0');
+			base[file_id] = process_file(client, endptr);
 			break;
 		}
-		case 'M': // Mmap
-			base = process_mmap(client, line + 2);
+		case 'M': { // Mmap
+			assert(len > 2);
+			char *endptr;
+			int file_id = strtoul(line + 2, &endptr, 0);
+			assert(endptr > line + 2);
+			assert(file_id >= 0 && file_id < MAX_FILES);
+			assert(*endptr != '\0');
+			process_mmap(client, base[file_id], endptr, file_id);
 			break;
+		}
 		case 'W': // Write
-			process_string(client, 'W', line + 2);
+			assert(len >= 2);
+			process_string(client, *line, line + 2);
 			break;
 		default:
 			goto finish;
@@ -337,12 +432,11 @@ static unsigned long process_munmap(struct client_info *client,
 static unsigned long process_stack(struct client_info *client,
 				   unsigned long start, size_t length) {
 	struct packet p;
-	// TODO pick a free random address
-	unsigned long addr = 0x10000000;
 	// TODO check RLIMIT_STACK but 2MB should be good enough for
 	// all apps and a fully allocated stack is better for
 	// randomization, or make this configurable per client
 	size_t new_length = 2 * 1024 * 1024;
+	unsigned long addr = get_free_address(client, new_length);
 
 	// Map a new stack
 	memset(&p, 0, sizeof(p));
@@ -423,6 +517,11 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		if (!process)
 			continue;
 
+		client->n_maps++;
+		assert(client->n_maps < MAX_MAPS);
+		client->maps[client->n_maps].start = start;
+		client->maps[client->n_maps].stop = stop;
+
 		// TODO assumes libaslrmalloc
 		if (strcmp(name, "[heap]") == 0) {
 			process_munmap(client, start, stop - start);
@@ -471,8 +570,12 @@ static void process_client(int client_fd) {
 	sd_pid_get_unit(client.creds.pid, &client.unit);
 
 	r = getpidcon_raw(client.creds.pid, &client.pidcon);
+	if (r < 0)
+		goto finish;
 
 	r = getpeercon_raw(client_fd, &client.peercon);
+	if (r < 0)
+		goto finish;
 
 	DPRINTF("PID %u UID %u GID %u unit %s pidcon %s peercon %s\n",
 		client.creds.pid, client.creds.uid, client.creds.gid,
@@ -501,6 +604,27 @@ finish:
 
 int main(void) {
 	int r;
+
+	/*
+	   Get number of virtual address bits with CPUID
+	   instruction. There are lots of different values from 36 to
+	   57 (https://en.wikipedia.org/wiki/X86).
+	 */
+	unsigned int eax, unused;
+	r = __get_cpuid(0x80000008, &eax, &unused, &unused, &unused);
+
+	/*
+	  Calculate a mask for requesting random addresses so that the
+	  kernel should accept them.
+	*/
+	user_va_space_bits = 36;
+	if (r == 1)
+		user_va_space_bits = ((eax >> 8) & 0xff) - 1;
+	random_address_mask = ((1UL << user_va_space_bits) - 1) &
+		PAGE_MASK;
+
+	// Also calculate number of random bytes needed for each address
+	getrandom_bytes = (user_va_space_bits - PAGE_BITS + 7) / 8;
 
 	// Set up listening socket
 	int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
