@@ -12,9 +12,10 @@ prefixdir = get_option('prefix')
 libdir = prefixdir / 'lib'
 sysconfdir = prefixdir / get_option('sysconfdir')
 client_exe = 'ld-so-client'
+client_path = prefixdir / 'lib' / client_exe
 conf.set_quoted('LIBDIR', libdir)
 conf.set_quoted('SYSCONFDIR', sysconfdir)
-conf.set_quoted('CLIENT', client_exe)
+conf.set_quoted('CLIENT', client_path)
 config_h = configure_file(
   output: 'config.h',
   configuration: conf)
@@ -45,19 +46,21 @@ if get_option('b_coverage') != true
 
   gen = meson.source_root() / 'generator.py'
   test_profile = 'TEST'
-  test_profile_dir = meson.build_root() / 'tests'
   mytarget = custom_target('targetname',
     output: test_profile,
     input: test_1,
     build_by_default: true,
     capture: true,
-    command: [gen, '@BUILD_ROOT@/@INPUT@']
+    command: [gen, '@0@/test_1'.format(meson.build_root())]
     )
 endif
 
 test_2 = executable('test_2',
   'ld-so-server.c',
   dependencies: [libsystemd, libselinux],
-  c_args: ['-DPROFILE_DIR="."', '-DFORCE_UNIT="TEST"']
+  c_args: [
+    '-DPROFILE_DIR="."',
+    '-DFORCE_UNIT="@0@/TEST"'.format(meson.build_root()),
+    '-DFORCE_CLIENT="@0@"'.format(meson.build_root() / client_exe)
+  ]
 )
-

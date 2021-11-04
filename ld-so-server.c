@@ -41,9 +41,15 @@
 #define PAGE_SIZE (1 << PAGE_BITS)
 #define PAGE_MASK (~(PAGE_SIZE - 1))
 
+#ifdef FORCE_CLIENT
+#undef CLIENT
+#define CLIENT FORCE_CLIENT
+#endif
+
 struct mapping {
 	unsigned long start, stop;
 };
+
 struct client_info {
 	int fd;
 	struct ucred creds;
@@ -299,6 +305,7 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 #ifdef FORCE_UNIT
 	// Test use
 	FILE *f = fopen(FORCE_UNIT, "r");
+	DPRINTF("Forced profile %s\n", FORCE_UNIT);
 #else
 	char path[4096];
 
@@ -468,6 +475,36 @@ static unsigned long process_stack(struct client_info *client,
 }
 
 /*
+  Check that /proc/$CLIENT/exe points to our client.
+*/
+static int check_pid_exe(struct client_info *client, pid_t pid) {
+	int r;
+	char path[4096];
+
+	r = snprintf(path, sizeof(path), "/proc/%d/exe", pid);
+	if (r >= sizeof(path))
+		return -1;
+
+	char buf[PATH_MAX];
+	r = readlink(path, buf, sizeof(buf));
+	if (r < 0 || r == sizeof(buf))
+		return false;
+
+	// TBD: assumes that the server can access the client exe,
+	// need not be true
+	r = access(buf, R_OK | X_OK);
+	if (r < 0)
+		return false;
+
+	if (strcmp(buf, CLIENT) != 0) {
+		DPRINTF("Bad exe %s, want %s\n", buf, CLIENT);
+		return false;
+	}
+
+	return true;
+}
+
+/*
   Read /proc/$CLIENT/maps and check for unexpected segments.
 
   [heap] segments are unmapped (TBD, assumes libaslrmalloc)
@@ -539,10 +576,7 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		}
 
 		// Does this point to our client executable?
-		size_t len = strlen(name);
-		// TODO check full path
-		if (len > sizeof(CLIENT) &&
-		    strcmp(&name[len - sizeof(CLIENT) + 1], CLIENT) == 0)
+		if (strcmp(name, CLIENT) == 0)
 			continue;
 
 		// Bad segments
@@ -580,6 +614,10 @@ static void process_client(int client_fd) {
 	DPRINTF("PID %u UID %u GID %u unit %s pidcon %s peercon %s\n",
 		client.creds.pid, client.creds.uid, client.creds.gid,
 		client.unit, client.pidcon, client.peercon);
+
+	r = check_pid_exe(&client, client.creds.pid);
+	if (!r)
+		goto finish;
 
 	// First pass: process segments
 	r = check_pid_maps(&client, client.creds.pid, true);
