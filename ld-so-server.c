@@ -134,6 +134,12 @@ retry:
 
 		addr <<= PAGE_BITS;
 		addr &= random_address_mask;
+
+		DPRINTF("checking %lx + %zx < %lx\n",
+			addr, size, random_address_mask);
+		if (addr + size >= random_address_mask)
+			goto retry;
+
 		for (unsigned int i = 0; i < client->n_maps; i++) {
 			DPRINTF("checking %lx < %lx + %zx < %lx\n",
 				client->maps[i].start, addr, size,
