@@ -196,6 +196,7 @@ static void send_fd(struct client_info *client, int fd) {
 // Check file properties and send a file descriptor of it if OK
 static unsigned long process_file(struct client_info *client, const char *line) {
 	int r;
+	unsigned long ret = -1;
 
 	char *endptr;
 	unsigned long size = strtoul(line, &endptr, 0);
@@ -254,10 +255,12 @@ static unsigned long process_file(struct client_info *client, const char *line) 
 #endif
 
 	send_fd(client, fd);
+
+	ret = get_free_address(client, size);
 finish:
 	close(fd);
 
-	return get_free_address(client, size);
+	return ret;
 }
 
 // Send Mmap command
