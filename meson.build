@@ -39,8 +39,8 @@ if get_option('b_coverage') != true
 
   test_1 = executable('test_1',
     'hello_world.c',
-    c_args: ['-nostdlib', '-nostartfiles', '-shared'],
-    link_args: ['-nostdlib', '-nostartfiles', '-shared'],
+    c_args: ['-nostdlib', '-nostartfiles', '-shared', '-fPIC'],
+    link_args: ['-nostdlib', '-nostartfiles', '-shared', '-fPIC'],
     pie: true,
   )
 

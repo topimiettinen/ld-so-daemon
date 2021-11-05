@@ -217,9 +217,6 @@ void _start(void) {
 		case 'U': // mUnmap
 			sys_munmap(p.munmap.addr, p.munmap.length);
 			break;
-		case 'W': // Write
-			sys_write(2, &p.write.buf, p.write.count);
-			break;
 		}
 	}
 }

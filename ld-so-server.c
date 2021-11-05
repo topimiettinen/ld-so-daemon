@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <cpuid.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <selinux/selinux.h>
@@ -40,6 +41,10 @@
 #define PAGE_BITS 12
 #define PAGE_SIZE (1 << PAGE_BITS)
 #define PAGE_MASK (~(PAGE_SIZE - 1))
+#define PAGE_ALIGN_UP(size) (((size) + (PAGE_SIZE - 1)) & PAGE_MASK)
+
+// TODO assumes x86-64
+#define ELF_MACHINE EM_X86_64
 
 #ifdef FORCE_CLIENT
 #undef CLIENT
@@ -50,6 +55,13 @@ struct mapping {
 	unsigned long start, stop;
 };
 
+struct mmap_list {
+	struct mmap_args mmap;
+	int our_fd;
+	void *our_mmap;
+	struct mmap_list *next;
+};
+
 struct client_info {
 	int fd;
 	struct ucred creds;
@@ -57,6 +69,7 @@ struct client_info {
 	char *pidcon, *peercon;
 	struct mapping maps[MAX_MAPS];
 	int n_maps;
+	struct mmap_list *mmaps;
 };
 
 static unsigned long random_address_mask;
@@ -193,20 +206,322 @@ static void send_fd(struct client_info *client, int fd) {
 	send_packet(client, &p, fd);
 }
 
+// Get value of ELF symbol
+static unsigned long get_symbol_value(unsigned int index, void *image,
+				      const Elf64_Sym *symtab,
+				      const char *strtab) {
+	const Elf64_Sym *symbol = &symtab[index];
+	DPRINTF("Symbol %u name %s (%u) value %lx\n", index,
+		strtab[symbol->st_name];
+		symbol->st_name, symbol->st_value);
+	return symbol->st_value;
+}
+
+// RELocate with Addend type
+static int process_rela(struct client_info *client,
+			struct mmap_list *list,
+			const Elf64_Shdr *elf_section,
+			void *image, size_t stat_length,
+			const Elf64_Sym *symtab,
+			const char *strtab,
+			unsigned long their_base) {
+	int ret = -1;
+	unsigned int n_relocs = elf_section->sh_size /
+		elf_section->sh_entsize;
+	Elf64_Rela *elf_rela;
+	for (unsigned int i = 0; i < n_relocs; i++) {
+		elf_rela = (void *)((unsigned long)image +
+				    elf_section->sh_offset +
+				    elf_section->sh_entsize * i);
+		DPRINTF("Got reloc off %lx sym %lx type %lx addend %lx their_base %lx\n",
+			elf_rela->r_offset, ELF64_R_SYM(elf_rela->r_info),
+			ELF64_R_TYPE(elf_rela->r_info), elf_rela->r_addend,
+			their_base);
+
+		switch (ELF64_R_TYPE(elf_rela->r_info)) {
+		case R_X86_64_64: {
+			uint64_t value = get_symbol_value(ELF64_R_SYM(elf_rela->r_info),
+							  image, symtab, strtab);
+			// TODO fancier pointer arithmetic
+			*(uint64_t *)((unsigned long)image +
+				      elf_rela->r_offset) = their_base + value + elf_rela->r_addend;
+			break;
+		}
+		case R_X86_64_GLOB_DAT: {
+			uint64_t value = get_symbol_value(ELF64_R_SYM(elf_rela->r_info),
+							  image, symtab, strtab);
+			// TODO fancier pointer arithmetic
+			*(uint64_t *)((unsigned long)image +
+				      elf_rela->r_offset) = their_base + value;
+			break;
+		}
+		}
+		ret = 0;
+	}
+
+	return ret;
+}
+
+// Create a writable memory region with memfd and copy initial data
+static int copy_maps(struct mmap_list *p, void *base) {
+	int r, ret = -1;
+	void *temp_mmap = NULL;
+
+	if (p->our_fd != -1) {
+		temp_mmap = mmap(NULL, p->mmap.length, p->mmap.prot,
+				 p->mmap.flags & ~MAP_FIXED, p->our_fd, p->mmap.offset);
+		if (temp_mmap == MAP_FAILED) {
+			temp_mmap = NULL;
+			perror("mmap");
+			goto finish;
+		}
+	}
+
+	p->our_fd = memfd_create("ld-so-server relocations", MFD_CLOEXEC);
+	if (p->our_fd < 0) {
+		goto finish;
+	}
+	r = ftruncate(p->our_fd, p->mmap.length);
+	if (r < 0) {
+		perror("ftruncate");
+		goto finish;
+	}
+
+	p->mmap.offset = 0;
+	p->our_mmap = mmap((void *)((unsigned long)base + p->mmap.addr), p->mmap.length, p->mmap.prot,
+			   p->mmap.flags, p->our_fd, 0);
+	if (p->our_mmap == MAP_FAILED) {
+		perror("mmap");
+		goto finish;
+	}
+
+	// All OK
+	ret = 0;
+finish:
+	if (temp_mmap) {
+		pwrite(p->our_fd, temp_mmap, p->mmap.length, 0);
+		munmap(temp_mmap, p->mmap.length);
+	}
+	return ret;
+}
+
+// Process ELF relocations
+static unsigned long process_relocations(struct client_info *client, int fd,
+					 size_t stat_length) {
+	int r;
+	unsigned long ret = -1;
+	void *image = mmap(NULL, stat_length, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+	if (image == MAP_FAILED)
+		goto finish;
+
+	// We should only get valid ELF executables here
+	Elf64_Ehdr *elf_header = image;
+	if (memcmp(elf_header->e_ident, ELFMAG, SELFMAG) != 0 ||
+	    elf_header->e_machine != ELF_MACHINE) {
+		fprintf(stderr, "Not a valid ELF file\n");
+		goto finish;
+	}
+
+	// Check ELF segments
+	Elf64_Phdr *elf_segment;
+	unsigned long max_addr = 0;
+	struct mmap_list *list = NULL, *tail = NULL;
+	Elf64_Sym *dynamic_symtab = NULL;
+	char *dynamic_strtab = NULL;
+	for (unsigned int i = 0; i < elf_header->e_phnum; i++) {
+		elf_segment = (void *)((unsigned long)image +
+					      elf_header->e_phoff + elf_header->e_phentsize * i);
+
+		// TODO check if ELF headers and dynamic stuff is only
+		// needed by server and not in client
+		if (elf_segment->p_type == PT_LOAD) {
+			// Loadable segment
+			unsigned long offset = elf_segment->p_offset;
+			unsigned long vaddr = elf_segment->p_vaddr;
+			unsigned long align = vaddr & ~PAGE_MASK;
+			unsigned long length = elf_segment->p_memsz;
+			unsigned long file_length = elf_segment->p_filesz;
+			if (max_addr < vaddr + length)
+				max_addr = vaddr + length;
+			vaddr -= align;
+			offset -= align;
+			length += align;
+			file_length += align;
+			struct mmap_list *new = malloc(sizeof(*new));
+			new->mmap.addr = (void *)vaddr;
+			new->mmap.length = file_length;
+			new->mmap.prot = 0;
+			if (elf_segment->p_flags & PF_X)
+				new->mmap.prot |= PROT_EXEC;
+			if (elf_segment->p_flags & PF_W)
+				new->mmap.prot |= PROT_WRITE;
+			if (elf_segment->p_flags & PF_R)
+				new->mmap.prot |= PROT_READ;
+			new->mmap.flags = MAP_FIXED | MAP_PRIVATE;
+			new->mmap.fd = 0;
+			new->mmap.offset = offset;
+			new->our_fd = fd;
+			new->next = list;
+			list = new;
+			if (!tail)
+				tail = new;
+
+			/*
+			  If the file size is smaller than in memory
+			  size, we may have some BSS.
+			*/
+			if (PAGE_ALIGN_UP(file_length) < PAGE_ALIGN_UP(length)) {
+				struct mmap_list *bss = malloc(sizeof(*bss));
+				bss->mmap.addr = (void *)(vaddr + PAGE_ALIGN_UP(file_length));
+				bss->mmap.length = PAGE_ALIGN_UP(length) - PAGE_ALIGN_UP(file_length);
+				bss->mmap.prot = new->mmap.prot;
+				bss->mmap.flags = MAP_ANONYMOUS | MAP_FIXED | MAP_PRIVATE;
+				bss->mmap.fd = -1;
+				bss->mmap.offset = 0;
+				bss->our_fd = -1;
+				bss->next = list;
+				list = bss;
+			}
+		} else if (elf_segment->p_type == PT_DYNAMIC) {
+			// Dynamic symbols and strings for relocations
+			Elf64_Dyn *dynamic = (void *)((unsigned long)image +
+						      elf_segment->p_offset);
+			for (unsigned int j = 0; j < elf_segment->p_memsz / sizeof(Elf64_Dyn); j++) {
+				if (dynamic[j].d_tag == DT_STRTAB)
+					dynamic_strtab = (void *)((unsigned long)image +
+								  dynamic[j].d_un.d_ptr);
+				else if (dynamic[j].d_tag == DT_SYMTAB)
+					dynamic_symtab = (void *)((unsigned long)image +
+								  dynamic[j].d_un.d_ptr);
+			}
+		}
+
+	}
+
+	if (!list)
+		goto finish;
+
+	/*
+	  Mmap() the segments in correct in memory positions instead
+	  of raw file order. The result of first mmap(NULL, ...)
+	  determines the base address for the rest of the mappings.
+	*/
+	unsigned long our_base = 0;
+	//unsigned long our_base = 0x20000000;
+	for (struct mmap_list *p = list; p; p = p->next) {
+		DPRINTF("M addr %p len %lx prot %d flags %d fd %d off %lx our_fd %d\n",
+			p->mmap.addr, p->mmap.length, p->mmap.prot, p->mmap.flags,
+			p->mmap.fd, p->mmap.offset, p->our_fd);
+		int our_flags = p->mmap.flags;
+
+		/*
+		  If we have our_base, fix the mapping relative to it.
+		  For the first mapping, let kernel pick an address.
+		*/
+		void *base = NULL;
+		if (our_base)
+			base = (void *)(our_base + (unsigned long)p->mmap.addr);
+		else
+			our_flags &= ~MAP_FIXED;
+
+		if (p->mmap.prot & PROT_WRITE)
+			continue; // Handled in pass 2
+
+		p->our_mmap = mmap(base, p->mmap.length, p->mmap.prot,
+				   our_flags, p->our_fd, p->mmap.offset);
+		if (p->our_mmap == MAP_FAILED)
+			goto finish;
+
+		if (!our_base)
+			our_base = (unsigned long)p->our_mmap - (unsigned long)p->mmap.addr;
+	}
+
+	// Pass 2: copy_maps() needs a mapping address, our_base
+	for (struct mmap_list *p = list; p; p = p->next) {
+		if (p->mmap.prot & PROT_WRITE)
+			r = copy_maps(p, (void *)our_base);
+	}
+
+	unsigned long their_base = get_free_address(client, max_addr);
+	//unsigned long their_base = 0x10000000;
+
+	// Handle relocations
+	Elf64_Shdr *elf_section;
+	for (unsigned int i = 0; i < elf_header->e_shnum; i++) {
+		elf_section = (void *)((unsigned long)image +
+					      elf_header->e_shoff + elf_header->e_shentsize * i);
+
+		// x86_64: RELA only
+		if (elf_section->sh_type == SHT_RELA) {
+			r = process_rela(client, list, elf_section, (void *)our_base, stat_length,
+					 dynamic_symtab, dynamic_strtab, their_base);
+			if (r < 0)
+				goto finish;
+		}
+	}
+
+	// Pass 3: flush in memory modifications to memfd
+	for (struct mmap_list *p = list; p; p = p->next)
+		if (p->mmap.prot & PROT_WRITE && p->our_fd != -1 && p->our_mmap != NULL)
+			pwrite(p->our_fd, p->our_mmap, p->mmap.length, 0);
+
+	// Send file descriptors and mmap commands to client
+	for (struct mmap_list *l = list; l; l = l->next) {
+		DPRINTF("M addr %p len %lx prot %d flags %d fd %d off %lx our_fd %d\n",
+			l->mmap.addr, l->mmap.length, l->mmap.prot, l->mmap.flags,
+			l->mmap.fd, l->mmap.offset, l->our_fd);
+
+		// TODO only send descriptors once, there's probably
+		// only two per file
+		if (l->mmap.fd != -1)
+			send_fd(client, l->our_fd);
+
+		struct packet p;
+		// Mmap command
+		memset(&p, 0, sizeof(p));
+		p.code = 'M';
+		memcpy(&p.mmap, &l->mmap, sizeof(p.mmap));
+		p.mmap.addr = (void *)(their_base + (unsigned long)l->mmap.addr);
+		send_packet(client, &p, -1);
+
+		// cLose command
+		if (l->mmap.fd != -1) {
+			memset(&p, 0, sizeof(p));
+			p.code = 'L';
+			p.longval = l->mmap.fd;
+			send_packet(client, &p, -1);
+		}
+	}
+
+	if (list) {
+		tail->next = client->mmaps;
+		client->mmaps = list;
+	}
+
+	// Call command
+	struct packet p;
+	memset(&p, 0, sizeof(p));
+	p.code = 'C';
+	p.longval = their_base + elf_header->e_entry;
+	send_packet(client, &p, -1);
+
+	// Cleanup
+	r = munmap(image, stat_length);
+	if (r < 0)
+		goto finish;
+
+	// TODO mappings are never unmapped. They may be needed by
+	// other relocations from other files later.
+	ret = their_base;
+finish:
+	return ret;
+}
+
 // Check file properties and send a file descriptor of it if OK
-static unsigned long process_file(struct client_info *client, const char *line) {
+static unsigned long process_file(struct client_info *client, const char *file) {
 	int r;
 	unsigned long ret = -1;
 
-	char *endptr;
-	unsigned long size = strtoul(line, &endptr, 0);
-	assert(endptr > line + 1);
-	assert(size < (1 << user_va_space_bits));
-	assert(*endptr == ' ');
-	endptr++;
-	assert(*endptr != '\0');
-
-	char *file = endptr;
 	int fd = open(file, O_RDONLY);
 	if (fd < 0) {
 		fprintf(stderr, "Bad file %s, ignoring\n", file);
@@ -254,59 +569,16 @@ static unsigned long process_file(struct client_info *client, const char *line) 
 		goto finish;
 #endif
 
+	ret = process_relocations(client, fd, st.st_size);
+	if (ret < 0)
+		goto finish;
+
 	send_fd(client, fd);
 
-	ret = get_free_address(client, size);
 finish:
 	close(fd);
 
 	return ret;
-}
-
-// Send Mmap command
-static void process_mmap(struct client_info *client, unsigned long base, const char *line, int fd) {
-	int r;
-	struct packet p;
-	memset(&p, 0, sizeof(p));
-	p.code = 'M';
-	unsigned long map_addr;
-	r = sscanf(line, " %li %zi %i %i %zi", &map_addr, &p.mmap.length,
-		   &p.mmap.prot, &p.mmap.flags, &p.mmap.offset);
-	if (r == EOF)
-		return;
-	if (p.mmap.flags & MAP_ANONYMOUS)
-		p.mmap.fd = -1;
-	else
-		p.mmap.fd = fd;
-
-	p.mmap.addr = (void *)(base + map_addr);
-	send_packet(client, &p, -1);
-}
-
-// Send a command with long value
-static void process_number(struct client_info *client, char code,
-			   unsigned long value) {
-	struct packet p;
-	memset(&p, 0, sizeof(p));
-	p.code = code;
-	p.longval = value;
-	send_packet(client, &p, -1);
-}
-
-// Send a command with string value
-static void process_string(struct client_info *client, char code,
-			   const char *string) {
-	size_t len = strlen(string);
-	struct packet p;
-	if (len >= sizeof(p.write.buf))
-		return;
-
-	memset(&p, 0, sizeof(p));
-	p.code = code;
-	strncpy(p.write.buf, string, sizeof(p.write.buf));
-	p.write.buf[sizeof(p.write.buf) - 1] = '\0';
-	p.write.count = strlen(p.write.buf);
-	send_packet(client, &p, -1);
 }
 
 // Load a profile file
@@ -330,6 +602,7 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 		return false;
 
 	unsigned long base[MAX_FILES];
+	memset(base, 0, sizeof(base));
 	for (;;) {
 		char line[BUFSIZ];
 		char *s = fgets(line, sizeof(line), f);
@@ -345,29 +618,6 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 		case '#':
 		case '\0':
 			continue;
-		case 'C': { // Call to mmap base[file_id] + offset
-			assert(len > 2);
-			char *endptr;
-			int file_id = strtoul(line + 2, &endptr, 0);
-			assert(endptr > line + 2);
-			assert(file_id >= 0 && file_id < MAX_FILES);
-			assert(*endptr != '\0');
-			unsigned long offset = strtoul(endptr, NULL, 0);
-			assert(offset < ULONG_MAX);
-			DPRINTF("mmap base %lx offset %lx\n", base[file_id], offset);
-			process_number(client, *line, base[file_id] + offset);
-			break;
-		}
-		case 'E': // Exit
-		case 'L': // cLose
-			{
-			assert(len > 2);
-			char *endptr;
-			int value = strtol(line + 2, &endptr, 0);
-			assert(endptr > line + 2);
-			process_number(client, *line, value);
-			break;
-		}
 		case 'F': { // File
 			assert(len > 2);
 			char *endptr;
@@ -375,23 +625,12 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 			assert(endptr > line + 2);
 			assert(file_id >= 0 && file_id < MAX_FILES);
 			assert(*endptr != '\0');
-			base[file_id] = process_file(client, endptr);
-			break;
-		}
-		case 'M': { // Mmap
-			assert(len > 2);
-			char *endptr;
-			int file_id = strtoul(line + 2, &endptr, 0);
-			assert(endptr > line + 2);
-			assert(file_id >= 0 && file_id < MAX_FILES);
+			endptr++;
 			assert(*endptr != '\0');
-			process_mmap(client, base[file_id], endptr, file_id);
+			base[file_id] = process_file(client, endptr);
+			DPRINTF("mmap base[%d] %lx\n", file_id, base[file_id]);
 			break;
 		}
-		case 'W': // Write
-			assert(len >= 2);
-			process_string(client, *line, line + 2);
-			break;
 		default:
 			goto finish;
 		}

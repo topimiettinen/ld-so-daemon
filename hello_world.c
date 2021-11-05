@@ -9,7 +9,12 @@
 */
 
 // bss
-int foo;
+char foo[8192];
+
+// relocations
+const char msg[] = "Hello World from ld-so-daemon!\n";
+size_t msg_size = sizeof(msg);
+const char *ptr = msg;
 
 // void exit(int status)
 static void sys_exit(int status) {
@@ -32,7 +37,6 @@ static ssize_t sys_write(int fd, const void *buf, size_t count) {
 
 // First function started from kernel
 void _start(void) {
-	static const char msg[] = "Hello World from ld-so-daemon!\n";
-	sys_write(STDERR_FILENO, msg, sizeof(msg));
+	sys_write(STDERR_FILENO, ptr, msg_size);
 	sys_exit(EXIT_SUCCESS);
 }

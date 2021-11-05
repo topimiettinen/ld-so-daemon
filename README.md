@@ -9,10 +9,9 @@ This should be useful for hardening systemd services or it could be integrated i
 
 The server listens to a UNIX socket.
 It is used to pass file descriptors to the client and send the client commands to:
-- `mmap()`, `mprotect()` or `munmap()` memory areas
+- `mmap()` or `munmap()` memory areas
 - switch stack pointer to a new memory area
 - call a function at an address
-- `write()` for debugging
 - `exit()`
 - `close()` received file descriptors
 
@@ -33,13 +32,16 @@ Future features should include:
 for example, only allow certain system calls from a single library or don't allow a certain library to perform a set of system calls but others are not affected
 - possibly an extension where data from client (for example argv[0]) can be allowed to select a profile for non-systemd scenarios
 - using FUSE or `userfaultfd()`, analyze in a test run which parts of the ELF objects are actually used during program execution and only map those for production runs
+- possibly client authentication (for example, use a different UNIX
+  socket for each client with random names, assuming that they can't
+  enumerate them)
 
-The current proof of concept can execute a static Hello world binary without relocations.
+The current proof of concept can execute a static Hello world binary with some relocations.
 
 ```bash
 $ meson setup builddir
 $ meson compile -C builddir
-$ (cd builddir && ./test_2 2>/dev/null)&
+$ ./builddir/test_2 &
 $ ./builddir/ld-so-client
 Hello World from ld-so-daemon!
 ```
