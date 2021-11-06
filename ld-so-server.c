@@ -265,17 +265,11 @@ static int process_rela(struct client_info *client,
 // Create a writable memory region with memfd and copy initial data
 static int copy_maps(struct mmap_list *p, void *base) {
 	int r, ret = -1;
-	void *temp_mmap = NULL;
 
-	if (p->our_fd != -1) {
-		temp_mmap = mmap(NULL, p->mmap.length, p->mmap.prot,
-				 p->mmap.flags & ~MAP_FIXED, p->our_fd, p->mmap.offset);
-		if (temp_mmap == MAP_FAILED) {
-			temp_mmap = NULL;
-			perror("mmap");
-			goto finish;
-		}
-	}
+	assert(p);
+	assert(base);
+
+	int orig_fd = p->our_fd;
 
 	p->our_fd = memfd_create("ld-so-server relocations", MFD_CLOEXEC);
 	if (p->our_fd < 0) {
@@ -287,21 +281,23 @@ static int copy_maps(struct mmap_list *p, void *base) {
 		goto finish;
 	}
 
-	p->mmap.offset = 0;
-	p->our_mmap = mmap((void *)((unsigned long)base + p->mmap.addr), p->mmap.length, p->mmap.prot,
+	base = (void *)((unsigned long)base + p->mmap.addr);
+	DPRINTF("mmapping memfd %p + %lx\n", base, p->mmap.length);
+
+	p->our_mmap = mmap(base, p->mmap.length, p->mmap.prot,
 			   p->mmap.flags, p->our_fd, 0);
 	if (p->our_mmap == MAP_FAILED) {
 		perror("mmap");
 		goto finish;
 	}
+	if (orig_fd != -1)
+		pread(orig_fd, base, p->mmap.length, p->mmap.offset);
+
+	p->mmap.offset = 0;
 
 	// All OK
 	ret = 0;
 finish:
-	if (temp_mmap) {
-		pwrite(p->our_fd, temp_mmap, p->mmap.length, 0);
-		munmap(temp_mmap, p->mmap.length);
-	}
 	return ret;
 }
 
@@ -357,7 +353,7 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 				new->mmap.prot |= PROT_WRITE;
 			if (elf_segment->p_flags & PF_R)
 				new->mmap.prot |= PROT_READ;
-			new->mmap.flags = MAP_FIXED | MAP_PRIVATE;
+			new->mmap.flags = MAP_FIXED_NOREPLACE | MAP_PRIVATE;
 			new->mmap.fd = 0;
 			new->mmap.offset = offset;
 			new->our_fd = fd;
@@ -375,7 +371,7 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 				bss->mmap.addr = (void *)(vaddr + PAGE_ALIGN_UP(file_length));
 				bss->mmap.length = PAGE_ALIGN_UP(length) - PAGE_ALIGN_UP(file_length);
 				bss->mmap.prot = new->mmap.prot;
-				bss->mmap.flags = MAP_ANONYMOUS | MAP_FIXED | MAP_PRIVATE;
+				bss->mmap.flags = MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE;
 				bss->mmap.fd = -1;
 				bss->mmap.offset = 0;
 				bss->our_fd = -1;
@@ -403,43 +399,34 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 
 	/*
 	  Mmap() the segments in correct in memory positions instead
-	  of raw file order. The result of first mmap(NULL, ...)
-	  determines the base address for the rest of the mappings.
+	  of raw file order. Allocate a large block first to find an
+	  address which won't conflict with other mappings later, even
+	  when run from GDB.
 	*/
-	unsigned long our_base = 0;
-	//unsigned long our_base = 0x20000000;
+	void *our_base = mmap(NULL, max_addr, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+	if (our_base == MAP_FAILED)
+		goto finish;
+	r = munmap(our_base, max_addr);
+	if (r < 0)
+		goto finish;
+	DPRINTF("our_base %p + %lx\n", our_base, max_addr);
+
 	for (struct mmap_list *p = list; p; p = p->next) {
 		DPRINTF("M addr %p len %lx prot %d flags %d fd %d off %lx our_fd %d\n",
 			p->mmap.addr, p->mmap.length, p->mmap.prot, p->mmap.flags,
 			p->mmap.fd, p->mmap.offset, p->our_fd);
-		int our_flags = p->mmap.flags;
-
-		/*
-		  If we have our_base, fix the mapping relative to it.
-		  For the first mapping, let kernel pick an address.
-		*/
-		void *base = NULL;
-		if (our_base)
-			base = (void *)(our_base + (unsigned long)p->mmap.addr);
-		else
-			our_flags &= ~MAP_FIXED;
-
-		if (p->mmap.prot & PROT_WRITE)
-			continue; // Handled in pass 2
-
-		p->our_mmap = mmap(base, p->mmap.length, p->mmap.prot,
-				   our_flags, p->our_fd, p->mmap.offset);
-		if (p->our_mmap == MAP_FAILED)
-			goto finish;
-
-		if (!our_base)
-			our_base = (unsigned long)p->our_mmap - (unsigned long)p->mmap.addr;
-	}
-
-	// Pass 2: copy_maps() needs a mapping address, our_base
-	for (struct mmap_list *p = list; p; p = p->next) {
-		if (p->mmap.prot & PROT_WRITE)
-			r = copy_maps(p, (void *)our_base);
+		if (p->mmap.prot & PROT_WRITE) {
+			r = copy_maps(p, our_base);
+			if (r < 0)
+				goto finish;
+		} else {
+			void *base = (void *)((unsigned long)our_base + (unsigned long)p->mmap.addr);
+			DPRINTF("mmapping %p + %lx\n", base, p->mmap.length);
+			p->our_mmap = mmap(base, p->mmap.length, p->mmap.prot,
+					  p->mmap.flags | MAP_FIXED_NOREPLACE, p->our_fd, p->mmap.offset);
+			if (p->our_mmap == MAP_FAILED)
+				goto finish;
+		}
 	}
 
 	unsigned long their_base = get_free_address(client, max_addr);
@@ -453,7 +440,7 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 
 		// x86_64: RELA only
 		if (elf_section->sh_type == SHT_RELA) {
-			r = process_rela(client, list, elf_section, (void *)our_base, stat_length,
+			r = process_rela(client, list, elf_section, our_base, stat_length,
 					 dynamic_symtab, dynamic_strtab, their_base);
 			if (r < 0)
 				goto finish;
