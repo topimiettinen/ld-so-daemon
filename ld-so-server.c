@@ -195,7 +195,7 @@ static void send_packet(struct client_info *client, struct packet *p, int fd) {
 		cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
 		memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
 	}
-	sendmsg(client->fd, &msg, 0);
+	sendmsg(client->fd, &msg, MSG_NOSIGNAL);
 }
 
 // Send a file descriptor
