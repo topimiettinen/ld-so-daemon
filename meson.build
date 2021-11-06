@@ -37,8 +37,15 @@ if get_option('b_coverage') != true
     pie: true,
   )
 
+  test_1_lib = shared_library('test_1_lib',
+    'hello_world_lib.c',
+    c_args: ['-nostdlib', '-nostartfiles', '-shared', '-fPIC'],
+    link_args: ['-nostdlib', '-nostartfiles', '-shared', '-fPIC'],
+  )
+
   test_1 = executable('test_1',
     'hello_world.c',
+    link_with: test_1_lib,
     c_args: ['-nostdlib', '-nostartfiles', '-shared', '-fPIC'],
     link_args: ['-nostdlib', '-nostartfiles', '-shared', '-fPIC'],
     pie: true,

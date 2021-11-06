@@ -26,8 +26,12 @@ The server could also perform checks on the client, such as:
 
 The above items are used to select the profile for the client.
 
+Features include:
+- server randomizes the address space
+  ([ASLR](https://en.wikipedia.org/wiki/Address_space_layout_randomization))
+  of the client (mostly done, TBD for relocating heap, stack etc.)
+
 Future features should include:
-- server should randomize the address space ([ASLR](https://en.wikipedia.org/wiki/Address_space_layout_randomization)) of the client
 - extremely fine grained seccomp filters which check also the instruction pointer, so the check only applies to one ELF library:
 for example, only allow certain system calls from a single library or don't allow a certain library to perform a set of system calls but others are not affected
 - possibly an extension where data from client (for example argv[0]) can be allowed to select a profile for non-systemd scenarios
@@ -36,7 +40,9 @@ for example, only allow certain system calls from a single library or don't allo
   socket for each client with random names, assuming that they can't
   enumerate them)
 
-The current proof of concept can execute a static Hello world binary with some relocations.
+The current proof of concept can execute a dynamically linked, hand
+crafted 'Hello world' binary with ELF relocations resolved between
+shared objects.
 
 ```bash
 $ meson setup builddir

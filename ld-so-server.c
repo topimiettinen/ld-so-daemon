@@ -79,6 +79,16 @@ struct mmap_list {
 	struct mmap_list *next;
 };
 
+struct symtab_list {
+	const Elf64_Sym *symtab;
+	const char *strtab;
+	unsigned int n_symbols;
+	unsigned long their_base;
+	void *image;
+	unsigned long image_size;
+	struct symtab_list *next;
+};
+
 struct client_info {
 	int fd;
 	struct ucred creds;
@@ -87,6 +97,7 @@ struct client_info {
 	struct mapping maps[MAX_MAPS];
 	int n_maps;
 	struct mmap_list *mmaps;
+	struct symtab_list *symtabs;
 };
 
 static unsigned long random_address_mask;
@@ -223,25 +234,58 @@ static void send_fd(struct client_info *client, int fd) {
 	send_packet(client, &p, fd);
 }
 
+static void dump_symbols(const struct client_info *client) {
+#if DEBUG
+	for (struct symtab_list *p = client->symtabs; p; p = p->next) {
+		for (unsigned int i = 0; i < p->n_symbols; i++) {
+			const Elf64_Sym *symbol = &p->symtab[i];
+			DPRINTF("Symbol %u name %s (%u) value %lx shndx %x addr %lx\n", i,
+				&p->strtab[symbol->st_name],
+				symbol->st_name, symbol->st_value, symbol->st_shndx,
+				p->their_base + symbol->st_value);
+		}
+	}
+#endif
+}
+
+static unsigned long get_global_symbol_value(const struct client_info *client, const char *name) {
+	for (struct symtab_list *p = client->symtabs; p; p = p->next) {
+		for (unsigned int i = 0; i < p->n_symbols; i++) {
+			const Elf64_Sym *symbol = &p->symtab[i];
+			DPRINTF("Checking symbol %u name %s (%u) value %lx shndx %x addr %lx\n", i,
+				&p->strtab[symbol->st_name],
+				symbol->st_name, symbol->st_value, symbol->st_shndx,
+				p->their_base + symbol->st_value);
+			if (symbol->st_shndx != SHN_UNDEF &&
+			    strcmp(&p->strtab[symbol->st_name], name) == 0)
+				return p->their_base + symbol->st_value;
+		}
+	}
+	return 0;
+}
+
 // Get value of ELF symbol
-static unsigned long get_symbol_value(unsigned int index, void *image,
-				      const Elf64_Sym *symtab,
-				      const char *strtab) {
-	const Elf64_Sym *symbol = &symtab[index];
-	DPRINTF("Symbol %u name %s (%u) value %lx\n", index,
-		&strtab[symbol->st_name],
-		symbol->st_name, symbol->st_value);
-	return symbol->st_value;
+static unsigned long get_symbol_value(const struct client_info *client,
+				      unsigned int index,
+				      unsigned long their_base) {
+	unsigned long ret = 0;
+	const Elf64_Sym *symbol = &client->symtabs->symtab[index];
+	DPRINTF("Symbol %u name %s (%u) value %lx shndx %x\n", index,
+		&client->symtabs->strtab[symbol->st_name],
+		symbol->st_name, symbol->st_value, symbol->st_shndx);
+	if (symbol->st_shndx == SHN_UNDEF)
+		ret = get_global_symbol_value(client, &client->symtabs->strtab[symbol->st_name]);
+	else
+		ret = their_base + symbol->st_value;
+	DPRINTF("Returning %lx\n", ret);
+	return ret;
 }
 
 // RELocate with Addend type
-static int process_rela(struct client_info *client,
+static int process_rela(const struct client_info *client,
 			struct mmap_list *list,
 			const Elf64_Shdr *elf_section,
-			void *image, size_t stat_length,
-			const Elf64_Sym *symtab,
-			const char *strtab,
-			unsigned long their_base) {
+			void *image, unsigned long their_base) {
 	int ret = -1;
 	unsigned int n_relocs = elf_section->sh_size /
 		elf_section->sh_entsize;
@@ -250,28 +294,31 @@ static int process_rela(struct client_info *client,
 		elf_rela = (void *)((unsigned long)image +
 				    elf_section->sh_offset +
 				    elf_section->sh_entsize * i);
-		DPRINTF("Got reloc off %lx sym %lx type %lx addend %lx their_base %lx\n",
-			elf_rela->r_offset, ELF64_R_SYM(elf_rela->r_info),
-			ELF64_R_TYPE(elf_rela->r_info), elf_rela->r_addend,
-			their_base);
+		unsigned long offset = elf_rela->r_offset;
+		unsigned int symbol = ELF64_R_SYM(elf_rela->r_info);
+		unsigned int type = ELF64_R_TYPE(elf_rela->r_info);
+		unsigned long addend = elf_rela->r_addend;
+		DPRINTF("Got reloc off %lx sym %x type %x addend %lx their_base %lx\n",
+			offset, symbol, type, addend, their_base);
 
-		switch (ELF64_R_TYPE(elf_rela->r_info)) {
+		switch (type) {
 		case R_X86_64_64: {
-			uint64_t value = get_symbol_value(ELF64_R_SYM(elf_rela->r_info),
-							  image, symtab, strtab);
-			// TODO fancier pointer arithmetic
-			*(uint64_t *)((unsigned long)image +
-				      elf_rela->r_offset) = their_base + value + elf_rela->r_addend;
+			unsigned long value = get_symbol_value(client, symbol, their_base);
+			unsigned long *ptr = (void *)((unsigned long)image + offset);
+			*ptr = value + addend;
 			break;
 		}
+		case R_X86_64_JUMP_SLOT:
 		case R_X86_64_GLOB_DAT: {
-			uint64_t value = get_symbol_value(ELF64_R_SYM(elf_rela->r_info),
-							  image, symtab, strtab);
-			// TODO fancier pointer arithmetic
-			*(uint64_t *)((unsigned long)image +
-				      elf_rela->r_offset) = their_base + value;
+			uint64_t value = get_symbol_value(client, symbol, their_base);
+			unsigned long *ptr = (void *)((unsigned long)image + offset);
+			*ptr = value;
 			break;
 		}
+		default:
+			fprintf(stderr, "Unhandled relocation type %x, aborting\n",
+				type);
+			abort();
 		}
 		ret = 0;
 	}
@@ -338,8 +385,6 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 	// Check ELF segments
 	unsigned long max_addr = 0;
 	struct mmap_list *list = NULL, *tail = NULL;
-	Elf64_Sym *dynamic_symtab = NULL;
-	char *dynamic_strtab = NULL;
 	for (unsigned int i = 0; i < elf_header->e_phnum; i++) {
 		Elf64_Phdr *elf_segment = (void *)((unsigned long)image +
 						   elf_header->e_phoff + elf_header->e_phentsize * i);
@@ -394,20 +439,7 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 				bss->next = list;
 				list = bss;
 			}
-		} else if (elf_segment->p_type == PT_DYNAMIC) {
-			// Dynamic symbols and strings for relocations
-			Elf64_Dyn *dynamic = (void *)((unsigned long)image +
-						      elf_segment->p_offset);
-			for (unsigned int j = 0; j < elf_segment->p_memsz / sizeof(Elf64_Dyn); j++) {
-				if (dynamic[j].d_tag == DT_STRTAB)
-					dynamic_strtab = (void *)((unsigned long)image +
-								  dynamic[j].d_un.d_ptr);
-				else if (dynamic[j].d_tag == DT_SYMTAB)
-					dynamic_symtab = (void *)((unsigned long)image +
-								  dynamic[j].d_un.d_ptr);
-			}
 		}
-
 	}
 
 	if (!list)
@@ -448,21 +480,53 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 	unsigned long their_base = get_free_address(client, max_addr);
 	//unsigned long their_base = 0x10000000;
 
+	// Check ELF sections
+	Elf64_Sym *dynamic_symtab = NULL;
+	char *dynamic_strtab = NULL;
+	unsigned int n_symbols;
+	for (unsigned int i = 0; i < elf_header->e_shnum; i++) {
+		Elf64_Shdr *elf_section = (void *)((unsigned long)image +
+						   elf_header->e_shoff + elf_header->e_shentsize * i);
+		if (elf_section->sh_type == SHT_DYNSYM) {
+			dynamic_symtab = (void *)((unsigned long)image +
+						  elf_section->sh_offset);
+			n_symbols = elf_section->sh_size /
+				elf_section->sh_entsize;
+			Elf64_Word strtab_link = elf_section->sh_link;
+			Elf64_Shdr *strtab_section = (void *)((unsigned long)image +
+							      elf_header->e_shoff +
+							      elf_header->e_shentsize * strtab_link);
+			dynamic_strtab = (void *)((unsigned long)image +
+						  strtab_section->sh_offset);
+		}
+	}
+
+	if (dynamic_strtab && dynamic_symtab) {
+		struct symtab_list *new = malloc(sizeof(*new));
+		new->strtab = dynamic_strtab;
+		new->symtab = dynamic_symtab;
+		new->n_symbols = n_symbols;
+		new->their_base = their_base;
+		new->image = image;
+		new->image_size = stat_length;
+		new->next = client->symtabs;
+		client->symtabs = new;
+		dump_symbols(client);
+	}
+
 	// Handle relocations
 	for (unsigned int i = 0; i < elf_header->e_shnum; i++) {
 		Elf64_Shdr *elf_section = (void *)((unsigned long)image +
 						   elf_header->e_shoff + elf_header->e_shentsize * i);
-
 		// x86_64: RELA only
 		if (elf_section->sh_type == SHT_RELA) {
-			r = process_rela(client, list, elf_section, our_base, stat_length,
-					 dynamic_symtab, dynamic_strtab, their_base);
+			r = process_rela(client, list, elf_section, our_base, their_base);
 			if (r < 0)
 				goto finish;
 		}
 	}
 
-	// Pass 3: flush in memory modifications to memfd
+	// Flush in memory modifications to memfd
 	for (struct mmap_list *p = list; p; p = p->next)
 		if (p->mmap.prot & PROT_WRITE && p->our_fd != -1 && p->our_mmap != NULL)
 			pwrite(p->our_fd, p->our_mmap, p->mmap.length, 0);
@@ -509,13 +573,6 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 		send_packet(client, &p, -1);
 	}
 
-	// Cleanup
-	r = munmap(image, stat_length);
-	if (r < 0)
-		goto finish;
-
-	// TODO mappings are never unmapped. They may be needed by
-	// other relocations from other files later.
 	ret = their_base;
 finish:
 	return ret;
@@ -643,6 +700,8 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 			goto finish;
 		}
 	}
+
+	// TODO mappings are never unmapped.
 
 finish:
 	fclose(f);
