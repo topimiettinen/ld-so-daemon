@@ -30,12 +30,29 @@
 #define MAX_MAPS (MAX_FILES + STD_MAPS)
 
 //#define DEBUG 1
+//#define DEBUG_RND_ADDR 1
+//#define DEBUG_PID_MAPS 1
 #if DEBUG
 #define DPRINTF(format, ...)						\
 	fprintf(stderr, "%s: " format, __FUNCTION__, ##__VA_ARGS__)
-#else
+
+#if DEBUG_RND_ADDR
+#define DPRINTF_RND_ADDR DPRINTF
+#else // DEBUG_RND_ADDR
+#define DPRINTF_RND_ADDR(format, ...) do { } while (0)
+#endif // DEBUG_RND_ADDR
+
+#if DEBUG_PID_MAPS
+#define DPRINTF_PID_MAPS DPRINTF
+#else // DEBUG_PID_MAPS
+#define DPRINTF_PID_MAPS(format, ...) do { } while (0)
+#endif // DEBUG_PID_MAPS
+
+#else // DEBUG
 #define DPRINTF(format, ...) do { } while (0)
-#endif
+#define DPRINTF_RND_ADDR DPRINTF
+#define DPRINTF_PID_MAPS DPRINTF
+#endif // DEBUG
 
 // TODO assumes page size of 4096
 #define PAGE_BITS 12
@@ -148,22 +165,22 @@ retry:
 		addr <<= PAGE_BITS;
 		addr &= random_address_mask;
 
-		DPRINTF("checking %lx + %zx < %lx\n",
-			addr, size, random_address_mask);
+		DPRINTF_RND_ADDR("checking %lx + %zx < %lx\n",
+				 addr, size, random_address_mask);
 		if (addr + size >= random_address_mask)
 			goto retry;
 
 		for (unsigned int i = 0; i < client->n_maps; i++) {
-			DPRINTF("checking %lx < %lx + %zx < %lx\n",
-				client->maps[i].start, addr, size,
-				client->maps[i].stop);
+			DPRINTF_RND_ADDR("checking %lx < %lx + %zx < %lx\n",
+					 client->maps[i].start, addr, size,
+					 client->maps[i].stop);
 			if ((addr >= client->maps[i].start &&
 			     addr <= client->maps[i].stop) ||
 			    (addr + size >= client->maps[i].start &&
 			     addr + size <= client->maps[i].stop))
 				goto retry;
 		}
-		DPRINTF("found %lx\n", addr);
+		DPRINTF_RND_ADDR("found %lx\n", addr);
 		return addr;
 	}
 }
@@ -212,7 +229,7 @@ static unsigned long get_symbol_value(unsigned int index, void *image,
 				      const char *strtab) {
 	const Elf64_Sym *symbol = &symtab[index];
 	DPRINTF("Symbol %u name %s (%u) value %lx\n", index,
-		strtab[symbol->st_name];
+		&strtab[symbol->st_name],
 		symbol->st_name, symbol->st_value);
 	return symbol->st_value;
 }
@@ -772,7 +789,7 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		if (!s)
 			goto finish;
 
-		DPRINTF("Got line %s\n", line);
+		DPRINTF_PID_MAPS("Got line %s\n", line);
 
 		unsigned long start, stop, offset;
 		int pos;
@@ -781,8 +798,8 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		if (r == EOF)
 			return -1;
 		char *name = &line[pos];
-		DPRINTF("start %lx stop %lx offset %lx %s\n", start,
-			stop, offset, name);
+		DPRINTF_PID_MAPS("start %lx stop %lx offset %lx %s\n", start,
+				 stop, offset, name);
 
 		// On the second pass, don't process but just output
 		// TODO could verify that changes are applied correctly
