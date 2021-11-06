@@ -969,6 +969,8 @@ int main(void) {
 	for (;;) {
 		struct epoll_event events[MAX_EVENTS];
 		int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+		if (nfds < 0 && errno == EINTR)
+			continue;
 		if (nfds < 0) {
 			perror("epoll_wait");
 			exit(EXIT_FAILURE);
