@@ -298,23 +298,25 @@ static int process_rela(const struct client_info *client,
 		unsigned int symbol = ELF64_R_SYM(elf_rela->r_info);
 		unsigned int type = ELF64_R_TYPE(elf_rela->r_info);
 		unsigned long addend = elf_rela->r_addend;
+		unsigned long *ptr = (void *)((unsigned long)image + offset);
 		DPRINTF("Got reloc off %lx sym %x type %x addend %lx their_base %lx\n",
 			offset, symbol, type, addend, their_base);
 
 		switch (type) {
 		case R_X86_64_64: {
 			unsigned long value = get_symbol_value(client, symbol, their_base);
-			unsigned long *ptr = (void *)((unsigned long)image + offset);
 			*ptr = value + addend;
 			break;
 		}
 		case R_X86_64_JUMP_SLOT:
 		case R_X86_64_GLOB_DAT: {
-			uint64_t value = get_symbol_value(client, symbol, their_base);
-			unsigned long *ptr = (void *)((unsigned long)image + offset);
+			unsigned long value = get_symbol_value(client, symbol, their_base);
 			*ptr = value;
 			break;
 		}
+		case R_X86_64_RELATIVE:
+			*ptr = their_base + addend;
+			break;
 		default:
 			fprintf(stderr, "Unhandled relocation type %x, aborting\n",
 				type);
