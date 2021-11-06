@@ -320,7 +320,7 @@ finish:
 
 // Process ELF relocations
 static unsigned long process_relocations(struct client_info *client, int fd,
-					 size_t stat_length) {
+					 size_t stat_length, bool call) {
 	int r;
 	unsigned long ret = -1;
 	void *image = mmap(NULL, stat_length, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
@@ -500,12 +500,14 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 		client->mmaps = list;
 	}
 
-	// Call command
-	struct packet p;
-	memset(&p, 0, sizeof(p));
-	p.code = 'C';
-	p.longval = their_base + elf_header->e_entry;
-	send_packet(client, &p, -1);
+	if (call) {
+		// Call command
+		struct packet p;
+		memset(&p, 0, sizeof(p));
+		p.code = 'C';
+		p.longval = their_base + elf_header->e_entry;
+		send_packet(client, &p, -1);
+	}
 
 	// Cleanup
 	r = munmap(image, stat_length);
@@ -520,7 +522,7 @@ finish:
 }
 
 // Check file properties and send a file descriptor of it if OK
-static unsigned long process_file(struct client_info *client, const char *file) {
+static unsigned long process_file(struct client_info *client, const char *file, bool call) {
 	int r;
 	unsigned long ret = -1;
 
@@ -571,7 +573,7 @@ static unsigned long process_file(struct client_info *client, const char *file) 
 		goto finish;
 #endif
 
-	ret = process_relocations(client, fd, st.st_size);
+	ret = process_relocations(client, fd, st.st_size, call);
 	if (ret < 0)
 		goto finish;
 
@@ -620,7 +622,8 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 		case '#':
 		case '\0':
 			continue;
-		case 'F': { // File
+		case 'E':    // Executable
+		case 'L': {  // Library
 			assert(len > 2);
 			char *endptr;
 			int file_id = strtoul(line + 2, &endptr, 0);
@@ -629,7 +632,10 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 			assert(*endptr != '\0');
 			endptr++;
 			assert(*endptr != '\0');
-			base[file_id] = process_file(client, endptr);
+			bool call = false;
+			if (*line == 'E')
+				call = true;
+			base[file_id] = process_file(client, endptr, call);
 			DPRINTF("mmap base[%d] %lx\n", file_id, base[file_id]);
 			break;
 		}
