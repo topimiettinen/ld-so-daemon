@@ -3,14 +3,8 @@
 
 import argparse
 import io
-import mmap
 import os
 import re
-
-MAP_FIXED = 0x10
-
-PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
-PAGE_MASK = ~(PAGE_SIZE - 1)
 
 parser = argparse.ArgumentParser(description='Process ELF executable and produce output suitable for ld-so-daemon profile.')
 parser.add_argument('file')
