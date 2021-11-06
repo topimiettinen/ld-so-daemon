@@ -336,14 +336,13 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 	}
 
 	// Check ELF segments
-	Elf64_Phdr *elf_segment;
 	unsigned long max_addr = 0;
 	struct mmap_list *list = NULL, *tail = NULL;
 	Elf64_Sym *dynamic_symtab = NULL;
 	char *dynamic_strtab = NULL;
 	for (unsigned int i = 0; i < elf_header->e_phnum; i++) {
-		elf_segment = (void *)((unsigned long)image +
-					      elf_header->e_phoff + elf_header->e_phentsize * i);
+		Elf64_Phdr *elf_segment = (void *)((unsigned long)image +
+						   elf_header->e_phoff + elf_header->e_phentsize * i);
 
 		// TODO check if ELF headers and dynamic stuff is only
 		// needed by server and not in client
@@ -450,10 +449,9 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 	//unsigned long their_base = 0x10000000;
 
 	// Handle relocations
-	Elf64_Shdr *elf_section;
 	for (unsigned int i = 0; i < elf_header->e_shnum; i++) {
-		elf_section = (void *)((unsigned long)image +
-					      elf_header->e_shoff + elf_header->e_shentsize * i);
+		Elf64_Shdr *elf_section = (void *)((unsigned long)image +
+						   elf_header->e_shoff + elf_header->e_shentsize * i);
 
 		// x86_64: RELA only
 		if (elf_section->sh_type == SHT_RELA) {
