@@ -32,6 +32,7 @@ Features include:
   of the client (mostly done, TBD for relocating heap, stack etc.)
 
 Future features should include:
+- make GOT and PLT read-only for the client when possible
 - extremely fine grained seccomp filters which check also the instruction pointer, so the check only applies to one ELF library:
 for example, only allow certain system calls from a single library or don't allow a certain library to perform a set of system calls but others are not affected
 - possibly an extension where data from client (for example argv[0]) can be allowed to select a profile for non-systemd scenarios
@@ -51,3 +52,17 @@ $ ./builddir/test_2 &
 $ ./builddir/ld-so-client
 Hello World from ld-so-daemon!
 ```
+
+# Previous implementations
+
+- [Glibc](https://sourceware.org/git/?p=glibc.git;a=tree;f=elf;hb=HEAD)
+- [Musl](https://git.musl-libc.org/cgit/musl/tree/ldso)
+
+ELF documentation:
+- [Wikipedia](https://en.wikipedia.org/wiki/Executable_and_Linkable_Format)
+- [System V Application Binary Interface](http://www.sco.com/developers/devspecs/gabi41.pdf)
+- [System V Application Binary Interface - DRAFT - 10 June 2013](http://www.sco.com/developers/gabi/latest/contents.html)
+- [System V Application Binary Interface - AMD64 Architecture Processor Supplement](https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf)
+- [ELF Handling For Thread-Local Storage](https://uclibc.org/docs/tls.pdf)
+
+Excellent article about TLS: [A Deep dive into (implicit) Thread Local Storage](https://chao-tic.github.io/blog/2018/12/25/tls).
