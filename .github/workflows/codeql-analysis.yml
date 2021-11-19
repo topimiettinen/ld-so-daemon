@@ -47,7 +47,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v2.4.0
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
@@ -76,7 +76,7 @@ jobs:
     #   make release
 
     - name: Checkout
-      uses: actions/checkout@v1
+      uses: actions/checkout@v2.4.0
     - name: Install packages
       run: sudo apt-get install build-essential gcc clang meson libsystemd-dev libselinux1-dev
     - name: Setup

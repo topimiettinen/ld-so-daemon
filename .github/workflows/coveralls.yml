@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v2.4.0
       - name: Install packages
         run: sudo apt-get install build-essential gcc clang meson lcov libsystemd-dev libselinux1-dev
       - name: Setup
