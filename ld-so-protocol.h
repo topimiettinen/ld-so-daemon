@@ -22,6 +22,11 @@ struct packet {
 			void *addr;
 			size_t length;
 		} munmap;
+		struct seccomp_args {
+			unsigned short len;
+			void *filter;
+			unsigned int flags;
+		} seccomp;
 		struct stack_args {
 			void *dst, *src;
 			size_t length;

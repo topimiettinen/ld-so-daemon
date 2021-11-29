@@ -3,6 +3,9 @@
 #include "ld-so-protocol.h"
 
 #include <asm/unistd.h>
+#include <linux/filter.h>
+#include <linux/prctl.h>
+#include <linux/seccomp.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -65,6 +68,33 @@ static int sys_munmap(void *addr, size_t length) {
 	asm volatile("syscall"
 		     : "=a"(r)
 		     : "0"(__NR_munmap), "r"(addr), "r"(length)
+		     : "rcx", "r11", "memory");
+	return r;
+}
+
+
+// int prctl(int option, unsigned long arg2)
+static int sys_prctl(int option, unsigned long arg2) {
+	int r;
+	register int _option asm("rdi") = option;
+	register unsigned long _arg2 asm("rsi") = arg2;
+	register long _unused1 asm("rdx") = 0;
+	register long _unused2 asm("r10") = 0;
+	register long _unused3 asm("r8") = 0;
+	asm volatile("syscall"
+		     : "=a"(r)
+		     : "0"(__NR_prctl), "r"(_option), "r"(_arg2), "r"(_unused1),
+		       "r"(_unused2), "r"(_unused3)
+		     : "rcx", "r11", "memory");
+	return r;
+}
+
+// int seccomp(unsigned int operation, unsigned int flags, void *args);
+static int sys_seccomp(unsigned int operation, unsigned int flags, void *args) {
+	int r;
+	asm volatile("syscall"
+		     : "=a"(r)
+		     : "0"(__NR_seccomp), "D"(operation), "S"(flags), "d"(args)
 		     : "rcx", "r11", "memory");
 	return r;
 }
@@ -202,6 +232,14 @@ void _start(void) {
 				 p.mmap.flags,
 				 p.mmap.fd == -1 ? -1 : fds[p.mmap.fd],
 				 p.mmap.offset);
+			break;
+		case 'O': // seccOmp
+			sys_prctl(PR_SET_NO_NEW_PRIVS, 1);
+
+			struct sock_fprog seccomp;
+			seccomp.len = p.seccomp.len;
+			seccomp.filter = p.seccomp.filter;
+			sys_seccomp(SECCOMP_SET_MODE_FILTER, p.seccomp.flags, &seccomp);
 			break;
 		case 'S': // Switch stack
 			// TBD the switch may make the pointers stale

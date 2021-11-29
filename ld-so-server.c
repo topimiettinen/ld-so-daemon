@@ -10,8 +10,11 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <selinux/selinux.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/epoll.h>
@@ -95,7 +98,8 @@ struct client_info {
 	char *unit;
 	char *pidcon, *peercon;
 	struct mapping maps[MAX_MAPS];
-	int n_maps;
+	struct mapping exec_maps[MAX_MAPS];
+	int n_maps, n_exec_maps;
 	struct mmap_list *mmaps;
 	struct symtab_list *symtabs;
 };
@@ -367,6 +371,120 @@ finish:
 	return ret;
 }
 
+// Send mUnmap command
+static unsigned long send_munmap(struct client_info *client,
+				    unsigned long start, size_t length) {
+	struct packet p;
+	memset(&p, 0, sizeof(p));
+	p.code = 'U';
+	p.munmap.addr = (void *)start;
+	p.munmap.length = length;
+	send_packet(client, &p, -1);
+	return 0;
+}
+
+/*
+  Install seccomp filters to only allow system calls from executable
+  segments.
+*/
+static void add_seccomp(struct client_info *client) {
+	struct sock_filter *filter = NULL;
+	unsigned int count = 0;
+	int r;
+
+	for (unsigned int i = 0; i < client->n_exec_maps; i++) {
+		DPRINTF("seccomping %lx ... %lx\n",
+				 client->exec_maps[i].start, client->exec_maps[i].stop);
+		unsigned long start = client->exec_maps[i].start;
+		unsigned long stop = client->exec_maps[i].stop;
+		count += 7;
+		filter = realloc(filter, sizeof(struct sock_filter) * count);
+		// TODO endianness
+		// Compare MSW of IP to this segment
+		filter[count - 7] = (struct sock_filter)
+			BPF_STMT(BPF_LD + BPF_W + BPF_ABS,
+				 (offsetof(struct seccomp_data, instruction_pointer)) + sizeof(int));
+		filter[count - 6] = (struct sock_filter)
+			BPF_JUMP(BPF_JMP + BPF_JGE + BPF_K,
+				 start >> 32, 0, 5);
+		filter[count - 5] = (struct sock_filter)
+			BPF_JUMP(BPF_JMP + BPF_JGT + BPF_K,
+				 stop >> 32, 4, 0);
+
+		// Compare LSW of IP to this segment
+		filter[count - 4] = (struct sock_filter)
+			BPF_STMT(BPF_LD + BPF_W + BPF_ABS,
+				 (offsetof(struct seccomp_data, instruction_pointer)));
+		filter[count - 3] = (struct sock_filter)
+			BPF_JUMP(BPF_JMP + BPF_JGE + BPF_K,
+				 start & 0xffffffff, 0, 2);
+		filter[count - 2] = (struct sock_filter)
+			BPF_JUMP(BPF_JMP + BPF_JGT + BPF_K,
+				 stop & 0xffffffff, 1, 0);
+
+		// All OK: allow
+		filter[count - 1] = (struct sock_filter)
+			BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_ALLOW);
+	}
+	count++;
+	filter = realloc(filter, sizeof(struct sock_filter) * count);
+	// No match: kill
+	filter[count - 1] = (struct sock_filter)
+		BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_KILL_PROCESS);
+
+	for (unsigned int i = 0; i < count; i++)
+		DPRINTF("code 0x%x jt %d jf %d k %x\n", filter[i].code, filter[i].jt, filter[i].jf, filter[i].k);
+
+	int seccomp_fd = memfd_create("ld-so-server seccomp", MFD_CLOEXEC);
+	if (seccomp_fd < 0) {
+		perror("memfd_create");
+		return;
+	}
+
+	size_t seccomp_length = sizeof(struct sock_filter) * count;
+	r = ftruncate(seccomp_fd, seccomp_length);
+	if (r < 0) {
+		perror("ftruncate");
+		return;
+	}
+
+	pwrite(seccomp_fd, filter, seccomp_length, 0);
+
+	send_fd(client, seccomp_fd);
+
+	close(seccomp_fd);
+
+	unsigned long seccomp_base = get_free_address(client, seccomp_length);
+
+	// Mmap command
+	struct packet p;
+	memset(&p, 0, sizeof(p));
+	p.code = 'M';
+	p.mmap.addr = (void *)seccomp_base;
+	p.mmap.length = seccomp_length;
+	p.mmap.prot = PROT_READ;
+	p.mmap.flags = MAP_FIXED_NOREPLACE | MAP_PRIVATE;
+	p.mmap.fd = 0;
+	p.mmap.offset = 0;
+	send_packet(client, &p, -1);
+
+	// cLose command
+	memset(&p, 0, sizeof(p));
+	p.code = 'L';
+	p.longval = 0;
+	send_packet(client, &p, -1);
+
+	// seccOmp command
+	memset(&p, 0, sizeof(p));
+	p.code = 'O';
+	p.seccomp.len = count;
+	p.seccomp.filter = (void *)seccomp_base;
+	p.seccomp.flags = SECCOMP_FILTER_FLAG_LOG;
+	send_packet(client, &p, -1);
+
+	send_munmap(client, seccomp_base, seccomp_length);
+}
+
 // Process ELF relocations
 static unsigned long process_relocations(struct client_info *client, int fd,
 					 size_t stat_length, bool call) {
@@ -459,7 +577,11 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 	r = munmap(our_base, max_addr);
 	if (r < 0)
 		goto finish;
-	DPRINTF("our_base %p + %lx\n", our_base, max_addr);
+
+	unsigned long their_base = get_free_address(client, max_addr);
+	//unsigned long their_base = 0x10000000;
+
+	DPRINTF("our_base %p + %lx, their_base %lx\n", our_base, max_addr, their_base);
 
 	for (struct mmap_list *p = list; p; p = p->next) {
 		DPRINTF("M addr %p len %lx prot %d flags %d fd %d off %lx our_fd %d\n",
@@ -478,9 +600,6 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 				goto finish;
 		}
 	}
-
-	unsigned long their_base = get_free_address(client, max_addr);
-	//unsigned long their_base = 0x10000000;
 
 	// Check ELF sections
 	Elf64_Sym *dynamic_symtab = NULL;
@@ -529,6 +648,7 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 	}
 
 	unsigned long low = ULONG_MAX, high = 0;
+	unsigned long exec_low = ULONG_MAX, exec_high = 0;
 	struct packet p;
 	// Send file descriptors and mmap commands to client
 	for (struct mmap_list *l = list; l; l = l->next) {
@@ -557,6 +677,13 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 		if (high < (unsigned long)p.mmap.addr + p.mmap.length)
 			high = (unsigned long)p.mmap.addr + p.mmap.length;
 
+		if (l->mmap.prot & PROT_EXEC) {
+			if (exec_low > (unsigned long)p.mmap.addr)
+				exec_low = (unsigned long)p.mmap.addr;
+			if (exec_high < (unsigned long)p.mmap.addr + p.mmap.length)
+				exec_high = (unsigned long)p.mmap.addr + p.mmap.length;
+		}
+
 		// cLose command
 		if (l->mmap.fd != -1) {
 			memset(&p, 0, sizeof(p));
@@ -582,9 +709,22 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 	if (list) {
 		tail->next = client->mmaps;
 		client->mmaps = list;
+
+		client->maps[client->n_maps].start = low - PAGE_SIZE;
+		client->maps[client->n_maps].stop = high + PAGE_SIZE;
+		client->n_maps++;
+
+		if (exec_low != ULONG_MAX) {
+			DPRINTF("exec start %lx stop %lx\n", exec_low, exec_high);
+			client->exec_maps[client->n_exec_maps].start = exec_low;
+			client->exec_maps[client->n_exec_maps].stop = exec_high;
+			client->n_exec_maps++;
+		}
 	}
 
 	if (call) {
+		add_seccomp(client);
+
 		// Call command
 		struct packet p;
 		memset(&p, 0, sizeof(p));
@@ -753,18 +893,6 @@ static void process_profiles(struct client_info *client) {
 		return;
 }
 
-// Send mUnmap command
-static unsigned long process_munmap(struct client_info *client,
-				    unsigned long start, size_t length) {
-	struct packet p;
-	memset(&p, 0, sizeof(p));
-	p.code = 'U';
-	p.munmap.addr = (void *)start;
-	p.munmap.length = length;
-	send_packet(client, &p, -1);
-	return 0;
-}
-
 // Install guard pages around DSOs with mmap(..., PROT_NONE, ...)
 static void add_guards(struct client_info *client,
 		       unsigned long start, size_t length) {
@@ -821,11 +949,7 @@ static unsigned long process_stack(struct client_info *client,
 	send_packet(client, &p, -1);
 
 	// Unmap old stack
-	memset(&p, 0, sizeof(p));
-	p.code = 'U';
-	p.munmap.addr = (void *)start;
-	p.munmap.length = length;
-	send_packet(client, &p, -1);
+	send_munmap(client, start, length);
 
 	add_guards(client, addr, new_length);
 	return 0;
@@ -900,27 +1024,37 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 
 		unsigned long start, stop, offset;
 		int pos;
-		r = sscanf(line, "%lx-%lx %*c%*c%*c%*c %lx %*x:%*x %*d %n",
-			   &start, &stop, &offset, &pos);
+		char x;
+		r = sscanf(line, "%lx-%lx %*c%*c%c%*c %lx %*x:%*x %*d %n",
+			   &start, &stop, &x, &offset, &pos);
 		if (r == EOF)
 			return -1;
 		char *name = &line[pos];
-		DPRINTF_PID_MAPS("start %lx stop %lx offset %lx %s\n", start,
-				 stop, offset, name);
+		DPRINTF_PID_MAPS("start %lx stop %lx x %c offset %lx %s\n", start,
+				 stop, x, offset, name);
 
 		// On the second pass, don't process but just output
 		// TODO could verify that changes are applied correctly
 		if (!process)
 			continue;
 
-		client->n_maps++;
-		assert(client->n_maps < MAX_MAPS);
 		client->maps[client->n_maps].start = start;
 		client->maps[client->n_maps].stop = stop;
+		client->n_maps++;
+		assert(client->n_maps < MAX_MAPS);
+
+		if (x == 'x') {
+			client->exec_maps[client->n_exec_maps].start = start;
+			client->exec_maps[client->n_exec_maps].stop = stop;
+			client->n_exec_maps++;
+			assert(client->n_exec_maps < MAX_MAPS);
+			DPRINTF_PID_MAPS("exec start %lx stop %lx %s\n", start,
+					 stop, name);
+		}
 
 		// TODO unmapping would assume libaslrmalloc
 		if (strcmp(name, "[heap]") == 0) {
-			//process_munmap(client, start, stop - start);
+			//send_munmap(client, start, stop - start);
 			//add_guards(client, start, stop - start);
 			continue;
 		}

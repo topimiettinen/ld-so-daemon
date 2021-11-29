@@ -14,6 +14,7 @@ It is used to pass file descriptors to the client and send the client commands t
 - call a function at an address
 - `exit()`
 - `close()` received file descriptors
+- install system call filters with `seccomp()`
 
 Using these primitives, dynamic loading can be achieved.
 
@@ -31,6 +32,7 @@ Features include:
   ([ASLR](https://en.wikipedia.org/wiki/Address_space_layout_randomization))
   of the client (mostly done, TBD for relocating heap, stack etc.)
 - guard pages are installed around DSOs with mmap(..., PROT_NONE, ...)
+- system calls are allowed only from known executable segments
 
 Future features should include:
 - make GOT and PLT read-only for the client when possible
