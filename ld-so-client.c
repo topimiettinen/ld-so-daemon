@@ -140,7 +140,7 @@ void _start(void) {
 		sys_exit(-1);
 	}
 
-	r = sys_connect(fd, (const struct sockaddr *)&sa, sizeof(sa));
+	r = sys_connect(fd, (const struct sockaddr *)&sa, sizeof(LD_SO_DAEMON_SOCKET) + 1);
 	if (r < 0) {
 		static const char fail[] = "Can't connect to " LD_SO_DAEMON_SOCKET_NICE
 					   ", exiting\n";

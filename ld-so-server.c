@@ -994,7 +994,7 @@ int main(void) {
 
 	struct sockaddr_un sa = { .sun_family = AF_UNIX,
 				  .sun_path = LD_SO_DAEMON_SOCKET };
-	r = bind(listen_fd, (const struct sockaddr *)&sa, sizeof(sa));
+	r = bind(listen_fd, (const struct sockaddr *)&sa, sizeof(LD_SO_DAEMON_SOCKET) + 1);
 	if (r < 0) {
 		sd_notifyf(0,
 			   "STATUS=Failed to start up: %s\n"
