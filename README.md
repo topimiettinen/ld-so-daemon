@@ -30,6 +30,7 @@ Features include:
 - server randomizes the address space
   ([ASLR](https://en.wikipedia.org/wiki/Address_space_layout_randomization))
   of the client (mostly done, TBD for relocating heap, stack etc.)
+- guard pages are installed around DSOs with mmap(..., PROT_NONE, ...)
 
 Future features should include:
 - make GOT and PLT read-only for the client when possible
@@ -40,6 +41,7 @@ for example, only allow certain system calls from a single library or don't allo
 - possibly client authentication (for example, use a different UNIX
   socket for each client with random names, assuming that they can't
   enumerate them)
+- batch requests
 
 The current proof of concept can execute a dynamically linked, hand
 crafted 'Hello world' binary with ELF relocations resolved between
@@ -51,6 +53,30 @@ $ meson compile -C builddir
 $ ./builddir/test_2 &
 $ ./builddir/ld-so-client
 Hello World from ld-so-daemon!
+/proc/self/maps:
+b26bc027000-b26bc028000 ---p 00000000 00:00 0 
+b26bc028000-b26bc029000 r--p 00000000 fe:03 5901936                      /home/topi/ld-so-daemon.git/builddir/test_1
+b26bc029000-b26bc02a000 r-xp 00001000 fe:03 5901936                      /home/topi/ld-so-daemon.git/builddir/test_1
+b26bc02a000-b26bc02b000 r--p 00002000 fe:03 5901936                      /home/topi/ld-so-daemon.git/builddir/test_1
+b26bc02b000-b26bc02d000 rw-p 00000000 00:01 5223                         /memfd:ld-so-server relocations (deleted)
+b26bc02d000-b26bc02f000 rw-p 00000000 00:00 0 
+b26bc02f000-b26bc030000 ---p 00000000 00:00 0 
+3e4f27627000-3e4f27628000 ---p 00000000 00:00 0 
+3e4f27628000-3e4f27828000 rw-p 00000000 00:00 0 
+3e4f27828000-3e4f27829000 ---p 00000000 00:00 0 
+7acab441f000-7acab4420000 ---p 00000000 00:00 0 
+7acab4420000-7acab4421000 r--p 00000000 fe:03 5902760                    /home/topi/ld-so-daemon.git/builddir/libtest_1_lib.so
+7acab4421000-7acab4422000 r-xp 00001000 fe:03 5902760                    /home/topi/ld-so-daemon.git/builddir/libtest_1_lib.so
+7acab4422000-7acab4423000 r--p 00002000 fe:03 5902760                    /home/topi/ld-so-daemon.git/builddir/libtest_1_lib.so
+7acab4423000-7acab4424000 rw-p 00000000 00:01 5221                       /memfd:ld-so-server relocations (deleted)
+7acab4424000-7acab4425000 ---p 00000000 00:00 0 
+7ffff7ff4000-7ffff7ff5000 ---p 00000000 00:00 0 
+7ffff7ff5000-7ffff7ff9000 r--p 00000000 00:00 0                          [vvar]
+7ffff7ff9000-7ffff7ffb000 r-xp 00000000 00:00 0                          [vdso]
+7ffff7ffb000-7ffff7ffc000 r--p 00000000 fe:03 5901909                    /home/topi/ld-so-daemon.git/builddir/ld-so-client
+7ffff7ffc000-7ffff7ffd000 r-xp 00001000 fe:03 5901909                    /home/topi/ld-so-daemon.git/builddir/ld-so-client
+7ffff7ffd000-7ffff7ffe000 r--p 00002000 fe:03 5901909                    /home/topi/ld-so-daemon.git/builddir/ld-so-client
+7ffff7ffe000-7ffff7fff000 rw-p 00002000 fe:03 5901909                    /home/topi/ld-so-daemon.git/builddir/ld-so-client
 ```
 
 # Previous implementations
@@ -66,3 +92,4 @@ ELF documentation:
 - [ELF Handling For Thread-Local Storage](https://uclibc.org/docs/tls.pdf)
 
 Excellent article about TLS: [A Deep dive into (implicit) Thread Local Storage](https://chao-tic.github.io/blog/2018/12/25/tls).
+Tutorial of [Linux program startup](http://dbp-consulting.com/tutorials/debugging/linuxProgramStartup.html).

@@ -528,29 +528,34 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 		}
 	}
 
-	// Flush in memory modifications to memfd
-	for (struct mmap_list *p = list; p; p = p->next)
-		if (p->mmap.prot & PROT_WRITE && p->our_fd != -1 && p->our_mmap != NULL)
-			pwrite(p->our_fd, p->our_mmap, p->mmap.length, 0);
-
+	unsigned long low = ULONG_MAX, high = 0;
+	struct packet p;
 	// Send file descriptors and mmap commands to client
 	for (struct mmap_list *l = list; l; l = l->next) {
 		DPRINTF("M addr %p len %lx prot %d flags %d fd %d off %lx our_fd %d\n",
 			l->mmap.addr, l->mmap.length, l->mmap.prot, l->mmap.flags,
 			l->mmap.fd, l->mmap.offset, l->our_fd);
 
+		// Flush in memory modifications to memfd
+		if (l->mmap.prot & PROT_WRITE && l->our_fd != -1 && l->our_mmap != NULL)
+			pwrite(l->our_fd, l->our_mmap, l->mmap.length, 0);
+
 		// TODO only send descriptors once, there's probably
 		// only two per file
 		if (l->mmap.fd != -1)
 			send_fd(client, l->our_fd);
 
-		struct packet p;
 		// Mmap command
 		memset(&p, 0, sizeof(p));
 		p.code = 'M';
 		memcpy(&p.mmap, &l->mmap, sizeof(p.mmap));
 		p.mmap.addr = (void *)(their_base + (unsigned long)l->mmap.addr);
 		send_packet(client, &p, -1);
+
+		if (low > (unsigned long)p.mmap.addr)
+			low = (unsigned long)p.mmap.addr;
+		if (high < (unsigned long)p.mmap.addr + p.mmap.length)
+			high = (unsigned long)p.mmap.addr + p.mmap.length;
 
 		// cLose command
 		if (l->mmap.fd != -1) {
@@ -560,6 +565,19 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 			send_packet(client, &p, -1);
 		}
 	}
+
+	// Map guard pages
+	memset(&p, 0, sizeof(p));
+	p.code = 'M';
+	p.mmap.addr = (void *)(low - PAGE_SIZE);
+	p.mmap.length = PAGE_SIZE;
+	p.mmap.prot = PROT_NONE;
+	p.mmap.flags = MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE;
+	p.mmap.fd = -1;
+	send_packet(client, &p, -1);
+
+	p.mmap.addr = (void *)high;
+	send_packet(client, &p, -1);
 
 	if (list) {
 		tail->next = client->mmaps;
@@ -747,6 +765,26 @@ static unsigned long process_munmap(struct client_info *client,
 	return 0;
 }
 
+// Install guard pages around DSOs with mmap(..., PROT_NONE, ...)
+static void add_guards(struct client_info *client,
+		       unsigned long start, size_t length) {
+	struct packet p;
+
+	memset(&p, 0, sizeof(p));
+	p.code = 'M';
+	p.mmap.addr = (void *)(start - PAGE_SIZE);
+	p.mmap.length = PAGE_SIZE;
+	p.mmap.prot = PROT_NONE;
+	p.mmap.flags = MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE;
+	p.mmap.fd = -1;
+	send_packet(client, &p, -1);
+
+	if (length) {
+		p.mmap.addr = (void *)(start + length);
+		send_packet(client, &p, -1);
+	}
+}
+
 /*
   Switch stacks:
   - map a new area for new stack
@@ -788,6 +826,8 @@ static unsigned long process_stack(struct client_info *client,
 	p.munmap.addr = (void *)start;
 	p.munmap.length = length;
 	send_packet(client, &p, -1);
+
+	add_guards(client, addr, new_length);
 	return 0;
 }
 
@@ -832,6 +872,8 @@ static int check_pid_exe(struct client_info *client, pid_t pid) {
   relocatable)
 
   Other segments must point to our client executable.
+
+  Guard pages are added around segments.
 */
 static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 	int r;
@@ -876,15 +918,18 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		client->maps[client->n_maps].start = start;
 		client->maps[client->n_maps].stop = stop;
 
-		// TODO assumes libaslrmalloc
+		// TODO unmapping would assume libaslrmalloc
 		if (strcmp(name, "[heap]") == 0) {
-			process_munmap(client, start, stop - start);
+			//process_munmap(client, start, stop - start);
+			//add_guards(client, start, stop - start);
 			continue;
 		}
 
 		// TODO check if these can be relocated
-		if (strcmp(name, "[vvar]") == 0 || strcmp(name, "[vdso]") == 0)
+		if (strcmp(name, "[vvar]") == 0 || strcmp(name, "[vdso]") == 0) {
+			add_guards(client, start, stop - start);
 			continue;
+		}
 
 		// TODO maybe switching stacks is too fragile
 		if (strcmp(name, "[stack]") == 0) {
@@ -893,8 +938,12 @@ static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 		}
 
 		// Does this point to our client executable?
-		if (strcmp(name, CLIENT) == 0)
+		if (strcmp(name, CLIENT) == 0) {
+			// TODO no guard page is mapped at the end to
+			// allow for heap
+			add_guards(client, start, 0);
 			continue;
+		}
 
 		// Bad segments
 		fprintf(stderr, "Bad segment %s, want %s\n", name, CLIENT);
