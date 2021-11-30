@@ -37,6 +37,7 @@
 //#define DEBUG_PID_MAPS 1
 #if DEBUG
 #define DPRINTF(format, ...)						\
+	/* Flawfinder: ignore */					\
 	fprintf(stderr, "%s: " format, __FUNCTION__, ##__VA_ARGS__)
 
 #if DEBUG_RND_ADDR
@@ -203,6 +204,7 @@ retry:
 // Send a packet, possibly also file descriptors (one ATM)
 static void send_packet(struct client_info *client, struct packet *p, int fd) {
 	union {
+		/* Flawfinder: ignore */
 		char buf[CMSG_SPACE(sizeof(fd))];
 		struct cmsghdr align;
 	} u;
@@ -225,6 +227,7 @@ static void send_packet(struct client_info *client, struct packet *p, int fd) {
 		cmsg->cmsg_level = SOL_SOCKET;
 		cmsg->cmsg_type = SCM_RIGHTS;
 		cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+		/* Flawfinder: ignore */
 		memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
 	}
 	sendmsg(client->fd, &msg, MSG_NOSIGNAL);
@@ -743,6 +746,7 @@ static unsigned long process_file(struct client_info *client, const char *file, 
 	int r;
 	unsigned long ret = -1;
 
+	/* Flawfinder: ignore */
 	int fd = open(file, O_RDONLY);
 	if (fd < 0) {
 		fprintf(stderr, "Bad file %s, ignoring\n", file);
@@ -806,9 +810,11 @@ finish:
 static bool process_profile(struct client_info *client, const char *prefix) {
 #ifdef FORCE_UNIT
 	// Test use
+	/* Flawfinder: ignore */
 	FILE *f = fopen(FORCE_UNIT, "r");
 	DPRINTF("Forced profile %s\n", FORCE_UNIT);
 #else
+	/* Flawfinder: ignore */
 	char path[4096];
 
 	int r = snprintf(path, sizeof(path), "%s/ld.so.daemon/%s.profile",
@@ -816,6 +822,7 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 	if (r < 0 || r > sizeof(path))
 		return false;
 
+	/* Flawfinder: ignore */
 	FILE *f = fopen(path, "r");
 #endif
 
@@ -825,14 +832,18 @@ static bool process_profile(struct client_info *client, const char *prefix) {
 	unsigned long base[MAX_FILES];
 	memset(base, 0, sizeof(base));
 	for (;;) {
+		/* Flawfinder: ignore */
 		char line[BUFSIZ];
 		char *s = fgets(line, sizeof(line), f);
 		if (!s)
 			goto finish;
 
+		/* Flawfinder: ignore */
 		if (line[strlen(line) - 1] == '\n')
+			/* Flawfinder: ignore */
 			line[strlen(line) - 1] = '\0';
 
+		/* Flawfinder: ignore */
 		size_t len = strlen(line);
 		DPRINTF("Got line %s\n", line);
 		switch (*line) {
@@ -960,19 +971,23 @@ static unsigned long process_stack(struct client_info *client,
 */
 static int check_pid_exe(struct client_info *client, pid_t pid) {
 	int r;
+	/* Flawfinder: ignore */
 	char path[4096];
 
 	r = snprintf(path, sizeof(path), "/proc/%d/exe", pid);
 	if (r >= sizeof(path))
 		return -1;
 
+	/* Flawfinder: ignore */
 	char buf[PATH_MAX];
+	/* Flawfinder: ignore */
 	r = readlink(path, buf, sizeof(buf));
 	if (r < 0 || r == sizeof(buf))
 		return false;
 
 	// TBD: assumes that the server can access the client exe,
 	// need not be true
+	/* Flawfinder: ignore */
 	r = access(buf, R_OK | X_OK);
 	if (r < 0)
 		return false;
@@ -1001,20 +1016,25 @@ static int check_pid_exe(struct client_info *client, pid_t pid) {
 */
 static int check_pid_maps(struct client_info *client, pid_t pid, bool process) {
 	int r;
+	/* Flawfinder: ignore */
 	char path[4096];
 
 	r = snprintf(path, sizeof(path), "/proc/%d/maps", pid);
 	if (r >= sizeof(path))
 		return -1;
 
+	/* Flawfinder: ignore */
 	FILE *f = fopen(path, "r");
 	if (!f)
 		return false;
 
 	for (;;) {
+		/* Flawfinder: ignore */
 		char line[BUFSIZ];
 		char *s = fgets(line, sizeof(line), f);
+		/* Flawfinder: ignore */
 		if (line[strlen(line) - 1] == '\n')
+			/* Flawfinder: ignore */
 			line[strlen(line) - 1] = '\0';
 
 		if (!s)

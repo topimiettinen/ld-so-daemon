@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 // bss
+/* Flawfinder: ignore */
 char foo[8192];
 
 // relocations
@@ -27,6 +28,7 @@ void _start(void) {
 
 	int r;
 	do {
+		/* Flawfinder: ignore */
 		char buf[4096];
 		r = sys_read(fd, buf, sizeof(buf));
 		if (r > 0)

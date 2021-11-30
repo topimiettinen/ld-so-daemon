@@ -182,6 +182,7 @@ void _start(void) {
 
 	for (;;) {
 		// Get commands from server
+		/* Flawfinder: ignore */
 		char buf[4096];
 		struct packet p;
 		struct iovec iov = {
