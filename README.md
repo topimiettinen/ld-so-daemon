@@ -1,7 +1,7 @@
 # ld-so-daemon
 
 `ld-so-daemon` replaces dynamic loader `ld.so` with a very simple client and more complex server.
-The server does all ELF relocation processing (not implemented yet) based on predefined configuration profiles.
+The server does all ELF relocation processing based on predefined configuration profiles.
 The purpose of all this is to allow a scenario, where the client doesn't have access to any programs or libraries at all.
 Also the server doesn't need access to anything else than the served programs and libraries but not for example client's configuration files or user data.
 Configuration for the server can be generated when the programs or libraries are installed or updated.
