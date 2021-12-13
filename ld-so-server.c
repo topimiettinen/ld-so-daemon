@@ -202,7 +202,7 @@ retry:
 }
 
 // Send a packet, possibly also file descriptors (one ATM)
-static void send_packet(struct client_info *client, struct packet *p, int fd) {
+static int send_packet(struct client_info *client, struct packet *p, int fd) {
 	union {
 		/* Flawfinder: ignore */
 		char buf[CMSG_SPACE(sizeof(fd))];
@@ -230,15 +230,88 @@ static void send_packet(struct client_info *client, struct packet *p, int fd) {
 		/* Flawfinder: ignore */
 		memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
 	}
-	sendmsg(client->fd, &msg, MSG_NOSIGNAL);
+	ssize_t sent = sendmsg(client->fd, &msg, MSG_NOSIGNAL);
+	if (sent == -1)
+		return -errno;
+	return 0;
 }
 
 // Send a file descriptor
-static void send_fd(struct client_info *client, int fd) {
-	struct packet p;
-	memset(&p, 0, sizeof(p));
-	p.code = 'F';
-	send_packet(client, &p, fd);
+static int send_fd(struct client_info *client, int fd) {
+	struct packet p = {
+		.code = 'F',
+	};
+	return send_packet(client, &p, fd);
+}
+
+// Send Call command
+static int send_call(struct client_info *client, unsigned long address) {
+	struct packet p = {
+		.code = 'C',
+		.longval = address,
+	};
+	return send_packet(client, &p, -1);
+}
+
+// Send cLose command
+static int send_close(struct client_info *client, int fd) {
+	struct packet p = {
+		.code = 'L',
+		.longval = fd,
+	};
+	return send_packet(client, &p, -1);
+}
+
+// Send Mmap command
+static int send_mmap(struct client_info *client, void *addr,
+		     size_t length, int prot, int flags, int fd,
+		     off_t offset) {
+	struct packet p = {
+		.code = 'M',
+		.mmap.addr = addr,
+		.mmap.length = length,
+		.mmap.prot = prot,
+		.mmap.flags = flags,
+		.mmap.fd = fd,
+		.mmap.offset = offset,
+	};
+	return send_packet(client, &p, -1);
+}
+
+// Send mUnmap command
+static int send_munmap(struct client_info *client,
+		       unsigned long start, size_t length) {
+	struct packet p = {
+		.code = 'U',
+		.munmap.addr = (void *)start,
+		.munmap.length = length,
+	};
+	return send_packet(client, &p, -1);
+}
+
+// Send seccOmp command
+static int send_seccomp(struct client_info *client,
+			unsigned short len, void *filter, unsigned int flags) {
+	struct packet p = {
+		.code = 'O',
+		.seccomp.len = len,
+		.seccomp.filter = filter,
+		.seccomp.flags = flags,
+	};
+	return send_packet(client, &p, -1);
+}
+
+// Send Switch stack
+static int send_switch_stack(struct client_info *client, void *dst, void *src,
+			     size_t length, unsigned long delta) {
+	struct packet p = {
+		.code = 'S',
+		.stack.dst = dst,
+		.stack.src = src,
+		.stack.length = length,
+		.stack.delta = delta,
+	};
+	return send_packet(client, &p, -1);
 }
 
 static void dump_symbols(const struct client_info *client) {
@@ -374,18 +447,6 @@ finish:
 	return ret;
 }
 
-// Send mUnmap command
-static unsigned long send_munmap(struct client_info *client,
-				    unsigned long start, size_t length) {
-	struct packet p;
-	memset(&p, 0, sizeof(p));
-	p.code = 'U';
-	p.munmap.addr = (void *)start;
-	p.munmap.length = length;
-	send_packet(client, &p, -1);
-	return 0;
-}
-
 /*
   Install seccomp filters to only allow system calls from executable
   segments.
@@ -451,41 +512,46 @@ static void add_seccomp(struct client_info *client) {
 		return;
 	}
 
-	pwrite(seccomp_fd, filter, seccomp_length, 0);
+	ssize_t nwritten = pwrite(seccomp_fd, filter, seccomp_length, 0);
+	if (nwritten < 0) {
+		perror("pwrite");
+		return;
+	}
 
-	send_fd(client, seccomp_fd);
+	r = send_fd(client, seccomp_fd);
+	if (r < 0) {
+		fprintf(stderr, "send_fd: %s\n", strerror(-r));
+		return;
+	}
 
 	close(seccomp_fd);
 
 	unsigned long seccomp_base = get_free_address(client, seccomp_length);
 
-	// Mmap command
-	struct packet p;
-	memset(&p, 0, sizeof(p));
-	p.code = 'M';
-	p.mmap.addr = (void *)seccomp_base;
-	p.mmap.length = seccomp_length;
-	p.mmap.prot = PROT_READ;
-	p.mmap.flags = MAP_FIXED_NOREPLACE | MAP_PRIVATE;
-	p.mmap.fd = 0;
-	p.mmap.offset = 0;
-	send_packet(client, &p, -1);
+	r = send_mmap(client, (void *)seccomp_base, seccomp_length, PROT_READ,
+		      MAP_FIXED_NOREPLACE | MAP_PRIVATE, 0, 0);
+	if (r < 0) {
+		fprintf(stderr, "send_mmap: %s\n", strerror(-r));
+		return;
+	}
 
-	// cLose command
-	memset(&p, 0, sizeof(p));
-	p.code = 'L';
-	p.longval = 0;
-	send_packet(client, &p, -1);
+	r = send_close(client, 0);
+	if (r < 0) {
+		fprintf(stderr, "send_mmap: %s\n", strerror(-r));
+		return;
+	}
 
-	// seccOmp command
-	memset(&p, 0, sizeof(p));
-	p.code = 'O';
-	p.seccomp.len = count;
-	p.seccomp.filter = (void *)seccomp_base;
-	p.seccomp.flags = SECCOMP_FILTER_FLAG_LOG;
-	send_packet(client, &p, -1);
+	r = send_seccomp(client, count, (void *)seccomp_base, SECCOMP_FILTER_FLAG_LOG);
+	if (r < 0) {
+		fprintf(stderr, "send_seccomp: %s\n", strerror(-r));
+		return;
+	}
 
-	send_munmap(client, seccomp_base, seccomp_length);
+	r = send_munmap(client, seccomp_base, seccomp_length);
+	if (r < 0) {
+		fprintf(stderr, "send_munmap: %s\n", strerror(-r));
+		return;
+	}
 }
 
 // Process ELF relocations
@@ -652,7 +718,6 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 
 	unsigned long low = ULONG_MAX, high = 0;
 	unsigned long exec_low = ULONG_MAX, exec_high = 0;
-	struct packet p;
 	// Send file descriptors and mmap commands to client
 	for (struct mmap_list *l = list; l; l = l->next) {
 		DPRINTF("M addr %p len %lx prot %d flags %d fd %d off %lx our_fd %d\n",
@@ -668,46 +733,31 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 		if (l->mmap.fd != -1)
 			send_fd(client, l->our_fd);
 
-		// Mmap command
-		memset(&p, 0, sizeof(p));
-		p.code = 'M';
-		memcpy(&p.mmap, &l->mmap, sizeof(p.mmap));
-		p.mmap.addr = (void *)(their_base + (unsigned long)l->mmap.addr);
-		send_packet(client, &p, -1);
+		send_mmap(client, (void *)(their_base + (unsigned long)l->mmap.addr),
+			  l->mmap.length, l->mmap.prot, l->mmap.flags,
+			  l->mmap.fd, l->mmap.offset);
 
-		if (low > (unsigned long)p.mmap.addr)
-			low = (unsigned long)p.mmap.addr;
-		if (high < (unsigned long)p.mmap.addr + p.mmap.length)
-			high = (unsigned long)p.mmap.addr + p.mmap.length;
+		if (low > their_base + (unsigned long)l->mmap.addr)
+			low = their_base + (unsigned long)l->mmap.addr;
+		if (high < their_base + (unsigned long)l->mmap.addr + l->mmap.length)
+			high = their_base + (unsigned long)l->mmap.addr + l->mmap.length;
 
 		if (l->mmap.prot & PROT_EXEC) {
-			if (exec_low > (unsigned long)p.mmap.addr)
-				exec_low = (unsigned long)p.mmap.addr;
-			if (exec_high < (unsigned long)p.mmap.addr + p.mmap.length)
-				exec_high = (unsigned long)p.mmap.addr + p.mmap.length;
+			if (exec_low > their_base + (unsigned long)l->mmap.addr)
+				exec_low = their_base + (unsigned long)l->mmap.addr;
+			if (exec_high < their_base + (unsigned long)l->mmap.addr + l->mmap.length)
+				exec_high = their_base + (unsigned long)l->mmap.addr + l->mmap.length;
 		}
 
-		// cLose command
-		if (l->mmap.fd != -1) {
-			memset(&p, 0, sizeof(p));
-			p.code = 'L';
-			p.longval = l->mmap.fd;
-			send_packet(client, &p, -1);
-		}
+		if (l->mmap.fd != -1)
+			send_close(client, l->mmap.fd);
 	}
 
 	// Map guard pages
-	memset(&p, 0, sizeof(p));
-	p.code = 'M';
-	p.mmap.addr = (void *)(low - PAGE_SIZE);
-	p.mmap.length = PAGE_SIZE;
-	p.mmap.prot = PROT_NONE;
-	p.mmap.flags = MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE;
-	p.mmap.fd = -1;
-	send_packet(client, &p, -1);
-
-	p.mmap.addr = (void *)high;
-	send_packet(client, &p, -1);
+	send_mmap(client, (void *)(low - PAGE_SIZE), PAGE_SIZE, PROT_NONE,
+		  MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE, -1, 0);
+	send_mmap(client, (void *)high, PAGE_SIZE, PROT_NONE,
+		  MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE, -1, 0);
 
 	if (list) {
 		tail->next = client->mmaps;
@@ -728,12 +778,7 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 	if (call) {
 		add_seccomp(client);
 
-		// Call command
-		struct packet p;
-		memset(&p, 0, sizeof(p));
-		p.code = 'C';
-		p.longval = their_base + elf_header->e_entry;
-		send_packet(client, &p, -1);
+		send_call(client, their_base + elf_header->e_entry);
 	}
 
 	ret = their_base;
@@ -907,21 +952,12 @@ static void process_profiles(struct client_info *client) {
 // Install guard pages around DSOs with mmap(..., PROT_NONE, ...)
 static void add_guards(struct client_info *client,
 		       unsigned long start, size_t length) {
-	struct packet p;
-
-	memset(&p, 0, sizeof(p));
-	p.code = 'M';
-	p.mmap.addr = (void *)(start - PAGE_SIZE);
-	p.mmap.length = PAGE_SIZE;
-	p.mmap.prot = PROT_NONE;
-	p.mmap.flags = MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE;
-	p.mmap.fd = -1;
-	send_packet(client, &p, -1);
-
-	if (length) {
-		p.mmap.addr = (void *)(start + length);
-		send_packet(client, &p, -1);
-	}
+	send_mmap(client, (void *)(start - PAGE_SIZE), PAGE_SIZE, PROT_NONE,
+		  MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE, -1, 0);
+	if (length)
+		send_mmap(client, (void *)(start + length), PAGE_SIZE, PROT_NONE,
+			  MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE,
+			  -1, 0);
 }
 
 /*
@@ -932,7 +968,6 @@ static void add_guards(struct client_info *client,
 */
 static unsigned long process_stack(struct client_info *client,
 				   unsigned long start, size_t length) {
-	struct packet p;
 	// TODO check RLIMIT_STACK but 2MB should be good enough for
 	// all apps and a fully allocated stack is better for
 	// randomization, or make this configurable per client
@@ -940,24 +975,15 @@ static unsigned long process_stack(struct client_info *client,
 	unsigned long addr = get_free_address(client, new_length);
 
 	// Map a new stack
-	memset(&p, 0, sizeof(p));
-	p.code = 'M';
-	p.mmap.addr = (void *)addr;
-	p.mmap.length = new_length;
-	p.mmap.prot = PROT_READ | PROT_WRITE;
-	p.mmap.flags = MAP_PRIVATE | MAP_ANONYMOUS;
-	p.mmap.fd = -1;
-	send_packet(client, &p, -1);
+	send_mmap(client, (void *)addr, new_length, PROT_READ | PROT_WRITE,
+		  MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_PRIVATE,
+		  -1, 0);
 
 	// Switch to new stack
-	memset(&p, 0, sizeof(p));
-	p.code = 'S';
-	p.stack.dst = (void *)(addr + new_length - length);
-	p.stack.src = (void *)start;
-	p.stack.length = length;
 	// delta = old_stack_top - new_stack_top
-	p.stack.delta = (start + length) - (addr + new_length);
-	send_packet(client, &p, -1);
+	unsigned long delta = (start + length) - (addr + new_length);
+	send_switch_stack(client, (void *)(addr + new_length - length),
+			  (void *)start, length, delta);
 
 	// Unmap old stack
 	send_munmap(client, start, length);
