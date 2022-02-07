@@ -41,6 +41,6 @@ jobs:
           output: 'flawfinder_results.sarif'
 
       - name: Upload analysis results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@8b37404d562d866ad6a65d0ecb4fa5131e047ca4
+        uses: github/codeql-action/upload-sarif@1a927e9307bc11970b2c679922ebc4d03a5bd980
         with:
           sarif_file: ${{github.workspace}}/flawfinder_results.sarif
