@@ -95,3 +95,14 @@ ELF documentation:
 
 Excellent article about TLS: [A Deep dive into (implicit) Thread Local Storage](https://chao-tic.github.io/blog/2018/12/25/tls).
 Tutorial of [Linux program startup](http://dbp-consulting.com/tutorials/debugging/linuxProgramStartup.html).
+
+UPDATE: glibc uses ifunc symbols (`STT_GNU_IFUNC`) which are evaluated by executing code as part of symbol resolution process.
+Executing code from possibly untrusted library in the more privileged server context isn't OK, so the current architecture needs to be rethought.
+
+One possibility is to make the client by hacking glibc `ld.so` so that it would make relocations and execute the ifuncs but it would ask the server for file descriptors to library files.
+The server would just pass file descriptors to library files as needed.
+Privilege separation would be much weaker in this model.
+
+Another idea is keep current architecture but push evaluating ifuncs to client.
+
+The server could also try to sandbox running the ifuncs with another privilege separated process.
