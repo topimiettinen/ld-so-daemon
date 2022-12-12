@@ -16,5 +16,5 @@ jobs:
         uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8
       - name: Ensure SHA Pinned Actions
         # You may pin to the exact commit or the version.
-        uses: zgosalvez/github-actions-ensure-sha-pinned-actions@570fff1eb64d52ffae87990c117c2748c317b58c
+        uses: zgosalvez/github-actions-ensure-sha-pinned-actions@af2eb3226618e2494e3d9084f515ad6dcf16e229
         # uses: zgosalvez/github-actions-ensure-sha-pinned-actions@v1.1.1
