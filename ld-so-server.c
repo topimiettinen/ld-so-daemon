@@ -685,7 +685,8 @@ static unsigned long process_relocations(struct client_info *client, int fd,
 			Elf64_Word strtab_link = elf_section->sh_link;
 			Elf64_Shdr *strtab_section = (void *)((unsigned long)image +
 							      elf_header->e_shoff +
-							      elf_header->e_shentsize * strtab_link);
+							      elf_header->e_shentsize *
+							      (unsigned long)strtab_link);
 			dynamic_strtab = (void *)((unsigned long)image +
 						  strtab_section->sh_offset);
 		}
