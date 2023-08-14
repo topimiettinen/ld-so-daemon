@@ -36,7 +36,7 @@ jobs:
             azure.archive.ubuntu.com:80
             github.com:443
       - name: Checkout
-        uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9
+        uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
       - name: Install packages
         run: sudo apt-get install build-essential gcc clang meson libsystemd-dev libselinux1-dev
       - name: Setup
