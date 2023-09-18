@@ -58,6 +58,7 @@ jobs:
           azure.archive.ubuntu.com:80
           github.com:443
           objects.githubusercontent.com:443
+          security.ubuntu.com:80
           uploads.github.com:443
 
     - name: Checkout repository
