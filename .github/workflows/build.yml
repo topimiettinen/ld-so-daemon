@@ -33,6 +33,7 @@ jobs:
         with:
           egress-policy: block
           allowed-endpoints: >
+            archive.ubuntu.com:80
             azure.archive.ubuntu.com:80
             github.com:443
             security.ubuntu.com:80
