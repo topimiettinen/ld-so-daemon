@@ -2,6 +2,9 @@ on: push
 
 name: Check SHAs
 
+permissions:
+  contents: read
+
 jobs:
   check_shas:
     name: Check SHAs
